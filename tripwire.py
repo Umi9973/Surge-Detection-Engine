@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict, deque
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Set
 
 import numpy as np
 
@@ -15,11 +15,13 @@ class TumblingWindowTripwire:
         z_threshold: float = 3.0,
         min_history: int = 2,
         text_buffer_cap: int = 500,
+        volatile_subreddits: Optional[Set[str]] = None,
     ) -> None:
         self.window_seconds = window_seconds
         self.z_threshold = z_threshold
         self.min_history = min_history
         self.text_buffer_cap = text_buffer_cap
+        self.volatile_subreddits = volatile_subreddits or set()
         self._history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=history_size))
         self._current_counts: Dict[str, int] = defaultdict(int)
         self._current_texts: Dict[str, List[str]] = defaultdict(list)
@@ -44,21 +46,39 @@ class TumblingWindowTripwire:
 
             if len(history) >= self.min_history:
                 arr = np.array(history, dtype=float)
-                mean = np.mean(arr)
-                std = np.std(arr)
-                if std > 0:
-                    z_score = (count - mean) / std
+
+                if subreddit in self.volatile_subreddits:
+                    median = np.median(arr)
+                    mad = np.median(np.abs(arr - median))
+                    epsilon = 1e-6
+                    z_score = (count - median) / (mad + epsilon)
                     if z_score >= self.z_threshold:
                         yield {
                             "subreddit":    subreddit,
                             "window_start": self._current_window_start,
                             "window_end":   self._current_window_start + self.window_seconds,
                             "count":        count,
-                            "mean":         round(float(mean), 2),
-                            "std":          round(float(std), 2),
+                            "median":       round(float(median), 2),
+                            "mad":          round(float(mad), 2),
                             "z_score":      round(float(z_score), 2),
                             "texts":        texts,
                         }
+                else:
+                    mean = np.mean(arr)
+                    std = np.std(arr)
+                    if std > 0:
+                        z_score = (count - mean) / std
+                        if z_score >= self.z_threshold:
+                            yield {
+                                "subreddit":    subreddit,
+                                "window_start": self._current_window_start,
+                                "window_end":   self._current_window_start + self.window_seconds,
+                                "count":        count,
+                                "mean":         round(float(mean), 2),
+                                "std":          round(float(std), 2),
+                                "z_score":      round(float(z_score), 2),
+                                "texts":        texts,
+                            }
 
             history.append(count)
 

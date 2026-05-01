@@ -97,7 +97,7 @@ class DBSCANContextEngine(NLPContextEngine):
         for i, label in enumerate(valid_labels):
             keywords = self._ctfidf_keywords(all_token_lists, i)
             results.append({
-                "cluster_id":  label,
+                "cluster_id":  int(label),
                 "size":        len(clusters[label]),
                 "keywords":    keywords,
                 "noise_count": len(clusters.get(-1, [])),
