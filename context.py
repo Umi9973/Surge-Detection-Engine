@@ -29,6 +29,24 @@ class DBSCANContextEngine(NLPContextEngine):
         "what", "when", "how", "who", "which", "there", "they", "them",
     }
 
+    # When DBSCAN finds only one cluster, IDF is flat (every word scores 1.0),
+    # so TF alone drives selection and high-frequency generic words dominate.
+    # This extended set is applied as a secondary filter in that case only.
+    _SINGLE_CLUSTER_STOPWORDS = _STOPWORDS | {
+        # Sentiment / modifier filler
+        "really", "actually", "pretty", "quite", "still", "already",
+        "never", "always", "maybe", "probably", "literally", "very",
+        # Conversational words with no topic value
+        "looks", "wait", "man", "guy", "yeah", "good", "bad", "great",
+        "thing", "things", "someone", "anyone", "everyone", "anything",
+        # Common verbs that carry no topic signal
+        "want", "need", "know", "make", "take", "give", "look", "come",
+        "think", "say", "use", "try", "keep", "let", "feel", "seem",
+        # Reddit modbot / sidebar artifacts
+        "removed", "submission", "compose", "moderator", "subreddit",
+        "thread", "edit", "update", "deleted", "see", "also", "much",
+    }
+
     def __init__(
         self,
         model_name: str = "all-MiniLM-L6-v2",
@@ -67,7 +85,12 @@ class DBSCANContextEngine(NLPContextEngine):
             idf[word] = math.log((n_clusters + 1) / (doc_freq + 1)) + 1
 
         scores = {word: tf[word] * idf[word] for word in tf}
-        return [w for w, _ in sorted(scores.items(), key=lambda x: -x[1])][: self._top_keywords]
+        ranked = [w for w, _ in sorted(scores.items(), key=lambda x: -x[1])][: self._top_keywords]
+
+        if n_clusters == 1:
+            filtered = [w for w in ranked if w not in self._SINGLE_CLUSTER_STOPWORDS]
+            return filtered or ranked
+        return ranked
 
     def summarize_anomaly(self, texts: List[str]) -> List[Dict]:
         if len(texts) < self._dbscan_min_samples:

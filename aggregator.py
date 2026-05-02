@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import time
 from collections import defaultdict, Counter
 from datetime import datetime, timezone
 from typing import Dict, List, Set
@@ -11,6 +12,7 @@ DB_PATH = "G:\\Umi\\Python Projects\\Reddit Surge Detection\\anomalies.db"
 WINDOW_SECONDS     = 7200   # 2-hour rolling window
 JACCARD_THRESHOLD  = 0.3
 SUSTAINED_MIN_HOURS = 4
+MAX_EVENT_SPAN     = WINDOW_SECONDS * 2   # 4-hour cap — safeguard against transitivity chains
 
 # Words observed to appear across 5+ unrelated anomalies in this dataset — pure Reddit
 # conversational filler or sidebar/modbot artifacts. Stripped before Jaccard so only
@@ -22,6 +24,13 @@ AGGREGATOR_STOPWORDS: Set[str] = {
     "https", "www", "com", "reddit", "message", "post", "questions", "audio",
     # 5–6 anomaly range filler
     "some", "think", "his", "were", "time",
+    # Reddit meta-words (platform mechanics, not topic signal)
+    "comment", "comments", "karma", "upvote", "downvote", "thread",
+    "moderator", "subreddit", "submission", "compose", "removed",
+    # Platform/viral metric words (YouTube/Reddit engagement noise)
+    "likes", "views", "million", "broken",
+    # Generic conversational filler observed in single-cluster keyword bleed
+    "really", "looks", "wait", "man", "also", "much",
 }
 
 
@@ -144,46 +153,71 @@ class UnionFind:
             self.parent[px] = py
 
 
-def detect_flash_isolated(anomalies: List[Dict], claimed_ids: Set[int]) -> List[Dict]:
-    remaining = [a for a in anomalies if a["id"] not in claimed_ids]
+def _split_by_span(component: List[Dict], max_span: int) -> List[List[Dict]]:
+    """Break a component into sub-groups where no sub-group spans more than max_span seconds.
+    Sorted by window_start; starts a new group whenever the next anomaly would exceed the cap
+    from the current group's earliest member."""
+    sorted_c = sorted(component, key=lambda a: a["window_start"])
+    groups: List[List[Dict]] = []
+    current = [sorted_c[0]]
+    for a in sorted_c[1:]:
+        if a["window_start"] - current[0]["window_start"] <= max_span:
+            current.append(a)
+        else:
+            groups.append(current)
+            current = [a]
+    groups.append(current)
+    return groups
 
-    # Bucket into 2-hour windows
-    buckets: Dict[int, List[Dict]] = defaultdict(list)
-    for a in remaining:
-        bucket = (a["window_start"] // WINDOW_SECONDS) * WINDOW_SECONDS
-        buckets[bucket].append(a)
+
+def detect_flash_isolated(anomalies: List[Dict], claimed_ids: Set[int]) -> List[Dict]:
+    # Sort remaining anomalies by time so the inner loop can break early
+    remaining = sorted(
+        [a for a in anomalies if a["id"] not in claimed_ids],
+        key=lambda a: a["window_start"],
+    )
+
+    n = len(remaining)
+    uf = UnionFind(n)
+
+    left = 0
+    for right in range(1, n):
+        # Advance left until the oldest anomaly in the window is within WINDOW_SECONDS of right
+        while remaining[right]["window_start"] - remaining[left]["window_start"] > WINDOW_SECONDS:
+            left += 1
+        # Compare right against every anomaly currently inside the window
+        for k in range(left, right):
+            if remaining[k]["subreddit"] != remaining[right]["subreddit"]:
+                if jaccard(remaining[k]["keywords"], remaining[right]["keywords"]) >= JACCARD_THRESHOLD:
+                    uf.union(k, right)
+
+    components: Dict[int, List[Dict]] = defaultdict(list)
+    for i, a in enumerate(remaining):
+        components[uf.find(i)].append(a)
 
     events: List[Dict] = []
 
-    for bucket, group in sorted(buckets.items()):
-        n = len(group)
-        uf = UnionFind(n)
+    for component in components.values():
+        # Safeguard: if Union-Find chained anomalies more than MAX_EVENT_SPAN apart via
+        # transitivity, break the component back into time-bounded sub-groups
+        span = max(a["window_start"] for a in component) - min(a["window_start"] for a in component)
+        sub_components = _split_by_span(component, MAX_EVENT_SPAN) if span > MAX_EVENT_SPAN else [component]
 
-        for i in range(n):
-            for j in range(i + 1, n):
-                if group[i]["subreddit"] != group[j]["subreddit"]:
-                    if jaccard(group[i]["keywords"], group[j]["keywords"]) >= JACCARD_THRESHOLD:
-                        uf.union(i, j)
-
-        components: Dict[int, List[Dict]] = defaultdict(list)
-        for i, a in enumerate(group):
-            components[uf.find(i)].append(a)
-
-        for component in components.values():
-            subreddits = list({a["subreddit"] for a in component})
-            kw_sets    = [a["keywords"] for a in component]
+        for sub in sub_components:
+            subreddits = list({a["subreddit"] for a in sub})
+            kw_sets    = [a["keywords"] for a in sub]
             shared_kws = top_shared_keywords(kw_sets)
             event_type = "FLASH" if len(subreddits) > 1 else "ISOLATED"
 
             events.append({
                 "event_type":      event_type,
-                "event_start":     min(a["window_start"] for a in component),
-                "event_end":       max(a["window_end"]   for a in component),
+                "event_start":     min(a["window_start"] for a in sub),
+                "event_end":       max(a["window_end"]   for a in sub),
                 "subreddits":      subreddits,
                 "shared_keywords": shared_kws,
-                "peak_z_score":    max(a["z_score"] for a in component),
-                "anomaly_count":   len(component),
-                "anomaly_ids":     [a["id"] for a in component],
+                "peak_z_score":    max(a["z_score"] for a in sub),
+                "anomaly_count":   len(sub),
+                "anomaly_ids":     [a["id"] for a in sub],
             })
 
     return events
@@ -232,16 +266,25 @@ def save_events(conn: sqlite3.Connection, events: List[Dict]) -> None:
 def run() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     conn = sqlite3.connect(DB_PATH)
+    t_total = time.perf_counter()
 
+    t0 = time.perf_counter()
     print("Loading anomalies...")
     anomalies = load_anomalies(conn)
-    print(f"  {len(anomalies)} raw anomalies loaded.\n")
+    print(f"  {len(anomalies)} raw anomalies loaded.  ({time.perf_counter() - t0:.3f}s)\n")
 
+    t0 = time.perf_counter()
     sustained_events, claimed_ids = detect_sustained(anomalies)
-    other_events = detect_flash_isolated(anomalies, claimed_ids)
+    print(f"  SUSTAINED detection : {len(sustained_events)} events  ({time.perf_counter() - t0:.3f}s)")
 
+    t0 = time.perf_counter()
+    other_events = detect_flash_isolated(anomalies, claimed_ids)
+    print(f"  FLASH/ISOLATED      : {len(other_events)} events  ({time.perf_counter() - t0:.3f}s)")
+
+    t0 = time.perf_counter()
     all_events = sorted(sustained_events + other_events, key=lambda e: e["event_start"])
     save_events(conn, all_events)
+    print(f"  Saved to DB         : {len(all_events)} total events  ({time.perf_counter() - t0:.3f}s)\n")
 
     flash_count     = sum(1 for e in all_events if e["event_type"] == "FLASH")
     sustained_count = sum(1 for e in all_events if e["event_type"] == "SUSTAINED")
@@ -266,6 +309,7 @@ def run() -> None:
     print(f"\n{'=' * 80}")
     print(f"Result : {len(anomalies)} raw anomalies  ->  {len(all_events)} events")
     print(f"         {flash_count} FLASH  |  {sustained_count} SUSTAINED  |  {isolated_count} ISOLATED")
+    print(f"         Total time: {time.perf_counter() - t_total:.3f}s")
 
     conn.close()
 
