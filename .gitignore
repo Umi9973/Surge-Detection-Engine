@@ -1,6 +1,7 @@
 # Data files
 *.zst
 *.sqlite
+*.db
 *.json
 
 # Environment

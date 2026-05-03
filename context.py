@@ -27,6 +27,12 @@ class DBSCANContextEngine(NLPContextEngine):
         "not", "no", "so", "if", "as", "up", "out", "just", "like", "get",
         "got", "can", "all", "one", "been", "from", "by", "about", "more",
         "what", "when", "how", "who", "which", "there", "they", "them",
+        # Reaction / exclamation words — high frequency on Reddit, zero topic signal
+        "lol", "lmao", "omg", "wtf", "wow", "omfg", "bruh", "bro", "dude",
+        "haha", "hehe", "nah", "yep", "yup", "yeah",
+        "damn", "hell", "fuck", "shit", "crap",
+        # Internet acronyms
+        "ngl", "imo", "tbh", "btw", "fyi", "iirc",
     }
 
     # When DBSCAN finds only one cluster, IDF is flat (every word scores 1.0),
@@ -53,7 +59,7 @@ class DBSCANContextEngine(NLPContextEngine):
         umap_components: int = 2,
         dbscan_eps: float = 0.5,
         dbscan_min_samples: int = 5,
-        top_keywords: int = 5,
+        top_keywords: int = 8,
     ) -> None:
         self._model = SentenceTransformer(model_name)
         self._umap = UMAP(n_components=umap_components, random_state=42, verbose=False)
