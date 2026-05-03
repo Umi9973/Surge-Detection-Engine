@@ -75,3 +75,28 @@ This document tracks significant architectural challenges, bugs, and bottlenecks
 * **Key Takeaway:** Filter junk at the extraction source, not downstream. Downstream stripping creates empty slots; upstream filtering forces the algorithm to find better replacements. Same principle as upstream bot filtering — the earlier you remove noise, the richer the signal flowing through the rest of the pipeline.
 
 ---
+
+### [OPEN] Issue #5: Topic bleeding inside SUSTAINED chains
+
+* **Date Opened:** 2026-05-02
+* **Phase:** Phase 2 Prep — Cross-Subreddit Aggregator
+* **The Problem:** The `r/news` Dec 3 SUSTAINED chain (7hrs) includes keywords `hostag, hezbollah, territori, lebanes` (Gaza conflict) AND `flight, airlin` (an Alaska/Hawaiian Airlines story). Two distinct news stories are being chained together into one SUSTAINED event because they shared 2 keywords in a consecutive hour window.
+* **Root Cause:** `detect_sustained()` only checks that consecutive anomalies are 1 hour apart and share cluster-to-cluster overlap ≥ 0.5. It has no mechanism to detect when the dominant topic shifts mid-chain. A Gaza article and an airline article both happening in `r/news` on consecutive hours can satisfy the threshold if they share any 2 incidental words (e.g., `territori`, `govern`). The algorithm chains them into one event labeled "SUSTAINED" even though they are two separate stories.
+* **Potential Fix:** Introduce a **topic coherence check** at chain-building time. Options:
+  1. **Keyword consistency gate** — track a running "anchor keyword set" for the chain (e.g., first window's top keywords). Require that each new window shares ≥ 1 keyword with the anchor set, not just with the immediately previous window. Prevents slow keyword drift across the chain.
+  2. **Dominant cluster tracking** — store which cluster pair drove the SUSTAINED link at each step. If the linking cluster changes identity entirely mid-chain (Gaza cluster → Airline cluster), break the chain.
+* **Priority:** Medium — affects keyword display quality and event labeling accuracy for volatile subreddits like `r/news`. Does not affect FLASH detection.
+
+---
+
+### [OPEN] Issue #6: Keyword drift breaking valid SUSTAINED chains (Concept Drift)
+
+* **Date Opened:** 2026-05-03
+* **Phase:** Phase 2 Prep — Cross-Subreddit Aggregator
+* **The Problem:** On Dec 31, r/news had a SUSTAINED event starting at 20:00 UTC (z=11.24, keywords: `immigr, border, traffick`) about the Texas Eagle Pass border standoff. However, the 19:00 hour (z=9.71) is a separate ISOLATED event for the same story. Both hours are part of the same breaking news event, but they don't link because the vocabulary evolved between hours as the story developed.
+* **Root Cause:** `detect_sustained()` uses a daisy-chain approach — each window must overlap with its immediate predecessor. When breaking news evolves ("shooting reported at border" → "immigration standoff underway" → "border trafficking arrests"), the vocabulary shifts hour-to-hour. Hour N+1 may not share 2 keywords with Hour N even though both are the same story. One vocabulary gap anywhere in the chain breaks it permanently.
+* **This is the inverse of Issue #5:** Issue #5 is different stories falsely chaining; Issue #6 is the same story falsely splitting. Both stem from comparing only adjacent windows rather than tracking the story's evolving identity.
+* **Potential Fix (Anchor Clustering):** Hour 1 of a chain becomes the Anchor Cluster. Subsequent hours must overlap with the anchor (not just the previous window). As the chain grows, the anchor expands to include newly confirmed keywords — the math target evolves alongside the real-world story rather than locking to the first hour's vocabulary.
+* **Priority:** Medium-High — directly causes the highest z-score anomaly in the full December dataset (z=11.24) to be partially misclassified. Anchor Clustering also resolves Issue #5 as a side effect since a drifting story would fail the anchor check before reaching an unrelated topic.
+
+---

@@ -33,6 +33,9 @@ class DBSCANContextEngine(NLPContextEngine):
         "damn", "hell", "fuck", "shit", "crap",
         # Internet acronyms
         "ngl", "imo", "tbh", "btw", "fyi", "iirc",
+        # Weak function words and pronouns not caught by base stopwords
+        "him", "her", "his", "why", "only", "even", "than", "see", "now",
+        "most", "use", "very", "still", "then", "here",
     }
 
     # When DBSCAN finds only one cluster, IDF is flat (every word scores 1.0),
