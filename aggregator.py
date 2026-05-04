@@ -57,6 +57,24 @@ def max_cluster_overlap(clusters_a: List[Set[str]], clusters_b: List[Set[str]]) 
     return best
 
 
+def find_best_cluster_pair(
+    anchor_tracks: List[Set[str]], curr_clusters: List[Set[str]]
+) -> tuple[int, int, float]:
+    """Returns (anchor_idx, curr_idx, score) of the highest-scoring cluster pair.
+    Returns (-1, -1, 0.0) if no pair meets the min-2-intersection guard."""
+    best_score = 0.0
+    best_ai, best_ci = -1, -1
+    for ai, ca in enumerate(anchor_tracks):
+        for ci, cb in enumerate(curr_clusters):
+            inter = ca & cb
+            if len(inter) < 2:
+                continue
+            score = len(inter) / min(len(ca), len(cb))
+            if score > best_score:
+                best_score, best_ai, best_ci = score, ai, ci
+    return best_ai, best_ci, best_score
+
+
 def top_shared_keywords(groups: List[Set[str]], top_n: int = 6) -> List[str]:
     """Keywords that appear in the most subreddit keyword sets, ranked by frequency."""
     counter: Counter = Counter()
@@ -124,29 +142,63 @@ def detect_sustained(anomalies: List[Dict], claimed_ids: Set[int]) -> tuple[List
         i = 0
         while i < len(items):
             chain = [items[i]]
+            # Multi-Track Anchor: each DBSCAN cluster from Hour 1 gets its own track.
+            # Only the dominant track (the one that wins the first match at Hour 2) can
+            # extend the chain. This prevents cross-cluster contamination (Issue #5) while
+            # still allowing the dominant track to expand its vocabulary as the story evolves
+            # (Issue #6).
+            anchor_tracks: List[Set[str]] = (
+                [set(c) for c in items[i]["clusters"]] if items[i]["clusters"] else []
+            )
+            dominant_idx: int = -1  # locked after first successful link
+
             j = i + 1
             while j < len(items):
                 prev, curr = items[j - 1], items[j]
-                if (curr["window_start"] - prev["window_start"] == 3600 and
-                        max_cluster_overlap(prev["clusters"], curr["clusters"]) >= SUSTAINED_OVERLAP):
-                    chain.append(curr)
-                    j += 1
-                else:
+                if curr["window_start"] - prev["window_start"] != 3600:
                     break
+
+                if not anchor_tracks or not curr["clusters"]:
+                    break
+
+                if dominant_idx == -1:
+                    # Hour 2: find which anchor track best matches — this locks the lineage
+                    match = find_best_cluster_pair(anchor_tracks, curr["clusters"])
+                    if match[2] >= SUSTAINED_OVERLAP:
+                        dominant_idx = match[0]
+                        anchor_tracks[dominant_idx] |= curr["clusters"][match[1]]
+                        chain.append(curr)
+                        j += 1
+                    else:
+                        break
+                else:
+                    # Hour 3+: only the dominant track can link — prevents topic switching
+                    match = find_best_cluster_pair(
+                        [anchor_tracks[dominant_idx]], curr["clusters"]
+                    )
+                    if match[2] >= SUSTAINED_OVERLAP:
+                        anchor_tracks[dominant_idx] |= curr["clusters"][match[1]]
+                        chain.append(curr)
+                        j += 1
+                    else:
+                        break
 
             if len(chain) >= SUSTAINED_MIN_HOURS:
                 ids = [a["id"] for a in chain]
                 new_claimed.update(ids)
-                all_kws: Set[str] = set()
-                for a in chain:
-                    for cluster in a["clusters"]:
-                        all_kws |= cluster
+                # Keywords from the dominant track only — no cross-topic pollution
+                if dominant_idx != -1:
+                    shared_kws = sorted(anchor_tracks[dominant_idx])[:8]
+                else:
+                    shared_kws = sorted(
+                        set().union(*chain[0]["clusters"]) if chain[0]["clusters"] else set()
+                    )[:8]
                 events.append({
                     "event_type":      "SUSTAINED",
                     "event_start":     chain[0]["window_start"],
                     "event_end":       chain[-1]["window_end"],
                     "subreddits":      [subreddit],
-                    "shared_keywords": list(all_kws)[:8],
+                    "shared_keywords": shared_kws,
                     "peak_z_score":    max(a["z_score"] for a in chain),
                     "anomaly_count":   len(chain),
                     "anomaly_ids":     ids,
@@ -352,6 +404,26 @@ def run() -> None:
     print(f"Result : {len(anomalies)} raw anomalies  ->  {len(all_events)} events")
     print(f"         {flash_count} FLASH  |  {sustained_count} SUSTAINED  |  {isolated_count} ISOLATED")
     print(f"         Total time: {time.perf_counter() - t_total:.3f}s")
+
+    # --- Anchor Clustering validation: Dec 31 18:00 → Jan 1 02:00 (r/news) ---
+    VAL_START = 1704045600  # Dec 31 2023 18:00 UTC
+    VAL_END   = 1704074400  # Jan 1  2024 02:00 UTC
+    val_anomalies = [
+        a for a in anomalies
+        if a["subreddit"] == "news" and VAL_START <= a["window_start"] <= VAL_END
+    ]
+    if val_anomalies:
+        all_sustained_claimed = sustained_claimed
+        all_flash_claimed     = flash_claimed
+        print(f"\n{'─' * 80}")
+        print(f"Validation: Dec 31 18:00 → Jan 1 02:00  (r/news)  —  {len(val_anomalies)} anomalies")
+        print(f"{'─' * 80}")
+        for a in sorted(val_anomalies, key=lambda x: x["window_start"]):
+            dt  = datetime.fromtimestamp(a["window_start"], tz=timezone.utc).strftime("%b %d %H:%M UTC")
+            kws = sorted({kw for cluster in a["clusters"] for kw in cluster})[:8]
+            tag = ("SUSTAINED" if a["id"] in all_sustained_claimed else
+                   "FLASH"     if a["id"] in all_flash_claimed     else "ISOLATED")
+            print(f"  {dt}  z={a['z_score']:>6.2f}  [{tag:9}]  {kws}")
 
     conn.close()
 

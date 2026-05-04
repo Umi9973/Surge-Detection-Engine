@@ -76,27 +76,33 @@ This document tracks significant architectural challenges, bugs, and bottlenecks
 
 ---
 
-### [OPEN] Issue #5: Topic bleeding inside SUSTAINED chains
+### [CLOSED] Issue #5: Topic bleeding inside SUSTAINED chains
 
 * **Date Opened:** 2026-05-02
-* **Phase:** Phase 2 Prep — Cross-Subreddit Aggregator
-* **The Problem:** The `r/news` Dec 3 SUSTAINED chain (7hrs) includes keywords `hostag, hezbollah, territori, lebanes` (Gaza conflict) AND `flight, airlin` (an Alaska/Hawaiian Airlines story). Two distinct news stories are being chained together into one SUSTAINED event because they shared 2 keywords in a consecutive hour window.
-* **Root Cause:** `detect_sustained()` only checks that consecutive anomalies are 1 hour apart and share cluster-to-cluster overlap ≥ 0.5. It has no mechanism to detect when the dominant topic shifts mid-chain. A Gaza article and an airline article both happening in `r/news` on consecutive hours can satisfy the threshold if they share any 2 incidental words (e.g., `territori`, `govern`). The algorithm chains them into one event labeled "SUSTAINED" even though they are two separate stories.
-* **Potential Fix:** Introduce a **topic coherence check** at chain-building time. Options:
-  1. **Keyword consistency gate** — track a running "anchor keyword set" for the chain (e.g., first window's top keywords). Require that each new window shares ≥ 1 keyword with the anchor set, not just with the immediately previous window. Prevents slow keyword drift across the chain.
-  2. **Dominant cluster tracking** — store which cluster pair drove the SUSTAINED link at each step. If the linking cluster changes identity entirely mid-chain (Gaza cluster → Airline cluster), break the chain.
-* **Priority:** Medium — affects keyword display quality and event labeling accuracy for volatile subreddits like `r/news`. Does not affect FLASH detection.
+* **Date Closed:** 2026-05-03
+* **Phase:** Phase 1 — Cross-Subreddit Aggregator
+* **The Problem:** The `r/news` Dec 3 SUSTAINED chain (7hrs) included keywords from the Gaza conflict AND an Alaska/Hawaiian Airlines story — two distinct news stories chained into one event because they shared 2 incidental keywords in a consecutive hour window.
+* **Root Cause:** The flat Anchor from Issue #6's fix made this worse. Flattening all DBSCAN clusters from Hour 1 into a single `Set[str]` created a "catch-all net" — r/news firing 3 breaking stories simultaneously produced an anchor containing keywords from all three. Any subsequent hour only needed 2 words from that polluted set to pass the threshold.
+* **The Resolution:** Replaced the flat Anchor with a **Multi-Track Anchor** (`anchor_tracks: List[Set[str]]`) in `detect_sustained()`. Each DBSCAN cluster from Hour 1 gets its own isolated track. A new helper `find_best_cluster_pair(anchor_tracks, curr_clusters) → (anchor_idx, curr_idx, score)` finds the highest-scoring cluster pair. The first matching pair at Hour 2 locks the **dominant track** (`dominant_idx`). From Hour 3 onward, only `anchor_tracks[dominant_idx]` can extend the chain — other tracks are frozen. The dominant track expands (`|=`) as it matches, allowing vocabulary evolution within the single story while physically preventing cross-track contamination.
+* **Measured Impact:**
+  * Dec 3 r/news SUSTAINED: `airlin, tesla, babi, wolf, palestinian` (4 stories) → `civilian, hama, israel, militari` (pure Gaza chain)
+  * Dec 31 r/news SUSTAINED: `border, boat, pirat, houthi` (Texas + Red Sea mixed) → `border, immigr, migrant, texa` (pure border chain)
+  * Dec 26 r/entertainment SUSTAINED: dissolved — was held together by noise keywords, dominant track lock correctly broke it
+* **Key Takeaway:** A flat Anchor set and a Multi-Track Anchor solve opposite problems and break each other when combined. The flat anchor solves drift (Issue #6) but enables bleeding (Issue #5). The Multi-Track Anchor solves both simultaneously: the dominant track lock prevents cross-topic contamination, while the track's own `|=` expansion handles within-story vocabulary evolution. The DBSCAN cluster structure must be preserved all the way through the aggregator — flattening it at any stage discards the topic separation DBSCAN was built to produce.
 
 ---
 
-### [OPEN] Issue #6: Keyword drift breaking valid SUSTAINED chains (Concept Drift)
+### [CLOSED] Issue #6: Keyword drift breaking valid SUSTAINED chains (Concept Drift)
 
 * **Date Opened:** 2026-05-03
-* **Phase:** Phase 2 Prep — Cross-Subreddit Aggregator
-* **The Problem:** On Dec 31, r/news had a SUSTAINED event starting at 20:00 UTC (z=11.24, keywords: `immigr, border, traffick`) about the Texas Eagle Pass border standoff. However, the 19:00 hour (z=9.71) is a separate ISOLATED event for the same story. Both hours are part of the same breaking news event, but they don't link because the vocabulary evolved between hours as the story developed.
-* **Root Cause:** `detect_sustained()` uses a daisy-chain approach — each window must overlap with its immediate predecessor. When breaking news evolves ("shooting reported at border" → "immigration standoff underway" → "border trafficking arrests"), the vocabulary shifts hour-to-hour. Hour N+1 may not share 2 keywords with Hour N even though both are the same story. One vocabulary gap anywhere in the chain breaks it permanently.
-* **This is the inverse of Issue #5:** Issue #5 is different stories falsely chaining; Issue #6 is the same story falsely splitting. Both stem from comparing only adjacent windows rather than tracking the story's evolving identity.
-* **Potential Fix (Anchor Clustering):** Hour 1 of a chain becomes the Anchor Cluster. Subsequent hours must overlap with the anchor (not just the previous window). As the chain grows, the anchor expands to include newly confirmed keywords — the math target evolves alongside the real-world story rather than locking to the first hour's vocabulary.
-* **Priority:** Medium-High — directly causes the highest z-score anomaly in the full December dataset (z=11.24) to be partially misclassified. Anchor Clustering also resolves Issue #5 as a side effect since a drifting story would fail the anchor check before reaching an unrelated topic.
+* **Date Closed:** 2026-05-03
+* **Phase:** Phase 1 — Cross-Subreddit Aggregator
+* **The Problem:** On Dec 31, r/news had a SUSTAINED event starting at 20:00 UTC (z=11.24, keywords: `immigr, border, traffick`) about the Texas Eagle Pass border standoff. However, the 19:00 hour (z=9.71) was a separate ISOLATED event. The hypothesis was that both hours were the same story split by vocabulary drift.
+* **Root Cause:** `detect_sustained()` used a daisy-chain approach — each window compared only against its immediate predecessor. A single vocabulary gap anywhere in the chain broke it permanently.
+* **The Resolution:** Replaced daisy-chaining with a **Sliding Anchor** in `detect_sustained()`. When a chain starts, `anchor_hour1` is frozen as the event's semantic identity. Each new window is compared against `anchor_hour1 | prev_hour_keywords` (Hour 1 + previous hour). The anchor never grows beyond two components, bounding the Overlap Coefficient denominator and preventing a bloated anchor from causing false merges via incidental common words.
+* **Validation Finding:** The specific Dec 31 19:00 anomaly (`area, batteri, build, burn, car, colorado`) turned out to be a **different story** (Colorado vehicle fire) — not the Texas border standoff. Its ISOLATED classification was correct. The sliding anchor correctly blocked the merge since `{car, build, burn}` ∩ `{border, migrant, houthi}` = ∅.
+* **Measured Impact:** SUSTAINED events increased from 7 → 8. Two spurious Dec 8 post-Game Awards FLASH events (`show, game` and `game, didn`) dissolved and their anomalies correctly merged into the main Game Awards FLASH (3 subreddits → 4, 6 alerts → 10). A previously invisible Dec 5 Gaza news FLASH (`hama, civilian, israel`) surfaced after upstream stopword cleanup unblocked it.
+* **Side work — Upstream Stopwords:** Validation exposed filler tokens leaking through `context.py`: contracted negatives (`didn, don, won, isn, wasn, doesn, wouldn, couldn, hadn, shouldn` — apostrophe stripped by regex), and function words (`any → ani`, `being/been → be`, `these`, `other`). All added to `_STOPWORDS` in `context.py` upstream, forcing c-TF-IDF to replace them with real topic words.
+* **Key Takeaway:** Daisy-chain overlap is brittle at vocabulary boundaries. The Sliding Anchor (Hour 1 + prev hour) gives the algorithm one step of drift tolerance while keeping the anchor bounded — a large unbounded anchor would invert the Overlap Coefficient, letting `min(|anchor|, |curr|) = |curr|` score any 2-word incidental overlap as 0.5.
 
 ---

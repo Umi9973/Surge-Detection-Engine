@@ -36,6 +36,11 @@ class DBSCANContextEngine(NLPContextEngine):
         # Weak function words and pronouns not caught by base stopwords
         "him", "her", "his", "why", "only", "even", "than", "see", "now",
         "most", "use", "very", "still", "then", "here",
+        # Function words confirmed leaking into keywords via validation run
+        # "any" → stems to "ani", "being"/"been" → stems to "be" via SnowballStemmer
+        "any", "been", "being", "these", "other",
+        # Contracted negatives — apostrophe stripped by regex leaves "didn", "don", "isn" etc.
+        "didn", "don", "won", "isn", "wasn", "doesn", "wouldn", "couldn", "hadn", "shouldn",
     }
 
     # When DBSCAN finds only one cluster, IDF is flat (every word scores 1.0),
