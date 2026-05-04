@@ -18,11 +18,11 @@ TARGET_SUBREDDITS = [
     "news", "worldnews",
 ]
 
-# Full December 2023 backtest — Dec 1 builds rolling history, Dec 2–31 is detection
-STREAM_CUTOFF_TS = 1704067200  # 2024-01-01 00:00:00 UTC
+# Full November 2023 backtest — Nov 1 builds rolling history, Nov 2–30 is detection
+STREAM_CUTOFF_TS = 1701388800  # 2023-12-01 00:00:00 UTC
 
 DB_PATH   = os.path.join(os.path.dirname(__file__), "anomalies.db")
-DATA_FILE = os.path.join(os.path.dirname(__file__), "RC_2023-12.zst")
+DATA_FILE = os.path.join(os.path.dirname(__file__), "RC_2023-11.zst")
 
 
 # --- Database ---
@@ -91,7 +91,7 @@ def run() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
 
     print("=" * 70)
-    print("  Reddit Surge Detection — Full December 2023 Backtest")
+    print("  Reddit Surge Detection — Full November 2023 Backtest")
     print("=" * 70)
 
     if os.path.exists(DB_PATH):
@@ -103,7 +103,7 @@ def run() -> None:
     tripwire = TumblingWindowTripwire(volatile_subreddits={"news", "worldnews"})
     nlp      = DBSCANContextEngine()
 
-    print(f"\nStreaming full December 2023 UTC")
+    print(f"\nStreaming full November 2023 UTC")
     print(f"Results will be saved to: anomalies.db\n")
     print("-" * 70)
 
