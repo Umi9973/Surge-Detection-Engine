@@ -115,7 +115,7 @@ def run() -> None:
         window_dt = datetime.fromtimestamp(anomaly["window_start"], tz=timezone.utc)
         date_str  = window_dt.strftime("%Y-%m-%d %H:00 UTC")
 
-        clusters = nlp.summarize_anomaly(anomaly["texts"]) if anomaly["texts"] else []
+        clusters = nlp.summarize_anomaly(anomaly["texts"], window_start=anomaly["window_start"]) if anomaly["texts"] else []
         save_anomaly(conn, anomaly, clusters)
 
         print(

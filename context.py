@@ -3,10 +3,14 @@ from __future__ import annotations
 import math
 import re
 from abc import ABC, abstractmethod
-from collections import Counter
+from collections import Counter, deque
 from typing import Dict, List
 
 import numpy as np
+
+_BASELINE_WINDOW  = 7 * 24 * 3600  # 7-day rolling window in seconds
+_SPIKE_THRESHOLD  = 3.0             # spike_ratio above which baseline penalty is skipped
+_BASELINE_MIN_HRS = 24              # cold-start guard: no penalty until 24 hrs of history
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import DBSCAN
 from umap import UMAP
@@ -74,6 +78,21 @@ class DBSCANContextEngine(NLPContextEngine):
         self._dbscan_eps = dbscan_eps
         self._dbscan_min_samples = dbscan_min_samples
         self._top_keywords = top_keywords
+        # Rolling 7-day baseline for dynamic TF-IDF penalty
+        self._baseline_counts: Counter = Counter()
+        self._hour_buckets: deque = deque()  # (window_start: int, counts: Counter)
+
+    def update_baseline(self, window_start: int, token_counts: Counter) -> None:
+        """Accumulate token counts into the rolling baseline; prune buckets older than 7 days."""
+        self._hour_buckets.append((window_start, token_counts))
+        self._baseline_counts.update(token_counts)
+        while self._hour_buckets:
+            oldest_ts, oldest_counts = self._hour_buckets[0]
+            if window_start - oldest_ts > _BASELINE_WINDOW:
+                self._hour_buckets.popleft()
+                self._baseline_counts.subtract(oldest_counts)
+            else:
+                break
 
     def _tokenize(self, text: str) -> List[str]:
         tokens = re.findall(r"\b[a-z]{3,}\b", text.lower())
@@ -88,9 +107,9 @@ class DBSCANContextEngine(NLPContextEngine):
         if not target_tokens:
             return []
 
-        tf = Counter(target_tokens)
-        total = sum(tf.values())
-        tf = {word: count / total for word, count in tf.items()}
+        tf_raw = Counter(target_tokens)
+        total = sum(tf_raw.values())
+        tf = {word: count / total for word, count in tf_raw.items()}
 
         all_tokens = [set(tokens) for tokens in cluster_texts]
         idf = {}
@@ -99,6 +118,22 @@ class DBSCANContextEngine(NLPContextEngine):
             idf[word] = math.log((n_clusters + 1) / (doc_freq + 1)) + 1
 
         scores = {word: tf[word] * idf[word] for word in tf}
+
+        # Dynamic baseline penalty: suppress chronically common words, preserve spikes
+        n_hours = len(self._hour_buckets)
+        if n_hours >= _BASELINE_MIN_HRS:
+            dynamic_scores: dict = {}
+            for word, raw_score in scores.items():
+                C_baseline    = self._baseline_counts.get(word, 0)
+                baseline_rate = C_baseline / n_hours
+                C_current     = tf_raw.get(word, 0)
+                spike_ratio   = C_current / max(0.1, baseline_rate)
+                if spike_ratio >= _SPIKE_THRESHOLD:
+                    dynamic_scores[word] = raw_score          # spiking — no penalty
+                else:
+                    dynamic_scores[word] = raw_score / (1 + math.log(baseline_rate + 1))
+            scores = dynamic_scores
+
         ranked = [w for w, _ in sorted(scores.items(), key=lambda x: -x[1])][: self._top_keywords]
 
         if n_clusters == 1:
@@ -106,7 +141,7 @@ class DBSCANContextEngine(NLPContextEngine):
             return filtered or ranked
         return ranked
 
-    def summarize_anomaly(self, texts: List[str]) -> List[Dict]:
+    def summarize_anomaly(self, texts: List[str], window_start: int = 0) -> List[Dict]:
         if len(texts) < self._dbscan_min_samples:
             return []
 
@@ -126,6 +161,11 @@ class DBSCANContextEngine(NLPContextEngine):
 
         if not cluster_token_lists:
             return []
+
+        # Update rolling baseline from all texts (including DBSCAN noise points)
+        if window_start:
+            all_tokens = Counter(token for text in texts for token in self._tokenize(text))
+            self.update_baseline(window_start, all_tokens)
 
         valid_labels = list(cluster_token_lists.keys())
         all_token_lists = [cluster_token_lists[l] for l in valid_labels]
