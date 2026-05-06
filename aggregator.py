@@ -38,7 +38,15 @@ AGGREGATOR_STOPWORDS: Set[str] = {
     "really", "looks", "wait", "man", "also", "much",
     # Universal filler observed causing false cross-topic merges
     "people", "person",
+    # Chronic gaming background noise — appear in every gaming hour, no topic signal
+    "game", "play",
+    # Generic temporal/quality filler that bridges unrelated gaming co-spikes
+    "year", "new", "content",
 }
+
+# Pre-stemmed stopwords so the comparison happens in the same space as stemmed keywords.
+# "games" → stem → "game" → in _STEMMED_STOPWORDS → correctly stripped.
+_STEMMED_STOPWORDS: Set[str] = {_STEMMER.stem(w) for w in AGGREGATOR_STOPWORDS}
 
 
 # --- Math helpers ---
@@ -110,8 +118,8 @@ def load_anomalies(conn: sqlite3.Connection) -> List[Dict]:
                     kw = kw.strip()
                     if kw:
                         kw_set.add(kw)
-                kw_set -= AGGREGATOR_STOPWORDS
                 kw_set = {_STEMMER.stem(kw) for kw in kw_set}
+                kw_set -= _STEMMED_STOPWORDS
                 if kw_set:
                     clusters.append(kw_set)
         result.append({

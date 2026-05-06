@@ -9,7 +9,7 @@ from typing import Dict, List
 import numpy as np
 
 _BASELINE_WINDOW  = 7 * 24 * 3600  # 7-day rolling window in seconds
-_SPIKE_THRESHOLD  = 3.0             # spike_ratio above which baseline penalty is skipped
+_SPIKE_THRESHOLD  = 2.0             # spike_ratio above which baseline penalty is skipped
 _BASELINE_MIN_HRS = 24              # cold-start guard: no penalty until 24 hrs of history
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import DBSCAN
