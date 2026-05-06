@@ -106,3 +106,34 @@ This document tracks significant architectural challenges, bugs, and bottlenecks
 * **Key Takeaway:** Daisy-chain overlap is brittle at vocabulary boundaries. The Sliding Anchor (Hour 1 + prev hour) gives the algorithm one step of drift tolerance while keeping the anchor bounded — a large unbounded anchor would invert the Overlap Coefficient, letting `min(|anchor|, |curr|) = |curr|` score any 2-word incidental overlap as 0.5.
 
 ---
+
+### [CLOSED] Issue #7: AGGREGATOR_STOPWORDS applied before stemming — inflected forms bypass filter
+
+* **Date Opened:** 2026-05-06
+* **Date Closed:** 2026-05-06
+* **Phase:** Phase 1 — Cross-Subreddit Aggregator
+* **The Problem:** After adding `"game"` and `"play"` to `AGGREGATOR_STOPWORDS` to suppress chronic gaming background noise, the November backtest still showed 5 weak gaming FLASH events with keywords `game, screen`, `game, year, new`, `fun, play`, etc. The stopword additions appeared to have no effect.
+* **Root Cause:** `context.py`'s `_tokenize()` does not stem — it stores raw unstemmed tokens in the DB (`"games"`, `"playing"`, `"years"`). In `aggregator.py`, the pipeline was:
+  1. Load raw keyword strings from DB into `kw_set` (e.g. `{"games", "playing"}`)
+  2. `kw_set -= AGGREGATOR_STOPWORDS` — compares `"games"` against `"game"`. Not equal → survives.
+  3. `kw_set = {_STEMMER.stem(kw) for kw in kw_set}` — `stem("games") = "game"`, `stem("playing") = "play"`.
+  4. Result: `"game"` and `"play"` appear in the final keyword set despite being in `AGGREGATOR_STOPWORDS`.
+
+  The comparison was in unstemmed space; the output was in stemmed space. The two spaces never met.
+* **The Resolution:**
+  1. Added `_STEMMED_STOPWORDS: Set[str] = {_STEMMER.stem(w) for w in AGGREGATOR_STOPWORDS}` computed once at module load time.
+  2. Flipped the strip/stem order in `load_anomalies()`:
+     ```python
+     # Before (broken):
+     kw_set -= AGGREGATOR_STOPWORDS          # unstemmed comparison — leaks inflections
+     kw_set = {_STEMMER.stem(kw) for kw in kw_set}
+
+     # After (fixed):
+     kw_set = {_STEMMER.stem(kw) for kw in kw_set}   # stem first
+     kw_set -= _STEMMED_STOPWORDS                      # compare in stemmed space
+     ```
+  3. Also added `"year"`, `"new"`, `"content"` to `AGGREGATOR_STOPWORDS` — these were the residual shared tokens driving the 2 remaining weak gaming FLASH merges after `"game"` was blocked.
+* **Measured Impact:** November benchmark: 16 FLASH → 10 FLASH. All 5 weak gaming co-spike FLASHes dissolved (Nov 2 weekend co-spike, Nov 3 GOTY buildup, Nov 7 pre-GOTY, Nov 24 Black Friday, Nov 1 gaming noise). Zero false positives remaining. Precision 75% → 93%, F1 79% → 88%. **Grade B+ → Grade A.**
+* **Key Takeaway:** Stopword filters and token transformations must operate in the same space. Any transformation applied after the filter (stemming, lowercasing, normalization) creates a gap where transformed forms bypass the filter undetected. Always apply filters last, or pre-transform the filter vocabulary to match the token space it will be compared against.
+
+---
