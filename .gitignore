@@ -1,4 +1,7 @@
-# Data files
+# Data directory — raw dumps and generated databases
+data/
+
+# Data file types (belt-and-suspenders)
 *.zst
 *.sqlite
 *.db
@@ -14,9 +17,8 @@ __pycache__/
 *.pyc
 *.pyo
 
-# md files
-Past md files/
+# Project-specific docs (agent instructions, live plans)
 CLAUDE.md
-ARCHITECTURE.md
-TODO.md
-phase1-summary.md
+docs/ARCHITECTURE.md
+docs/TODO.md
+docs/archive/
