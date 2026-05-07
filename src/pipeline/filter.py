@@ -36,12 +36,14 @@ class SubredditFilter:
 
 
 if __name__ == "__main__":
-    import os
     import sys
+    from pathlib import Path
 
     sys.stdout.reconfigure(encoding="utf-8")
+    _root = Path(__file__).resolve().parent.parent.parent
+    sys.path.insert(0, str(_root))
 
-    from ingestion import ZstFileIngestor
+    from src.ingestion.ingestion import ZstFileIngestor
 
     TARGET_SUBREDDITS = [
         # Gaming Platforms & Hubs
@@ -51,7 +53,7 @@ if __name__ == "__main__":
         # Macro News Hubs
         "news", "worldnews",
     ]
-    DATA_FILE = os.path.join(os.path.dirname(__file__), "RC_2023-12.zst")
+    DATA_FILE = str(_root / "data" / "raw_dumps" / "RC_2023-12.zst")
 
     ingestor = ZstFileIngestor(DATA_FILE)
     filter_ = SubredditFilter(TARGET_SUBREDDITS)

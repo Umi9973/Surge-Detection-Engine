@@ -52,11 +52,11 @@ class ZstFileIngestor(DataIngestor):
 
 if __name__ == "__main__":
     import itertools
-    import os
     import sys
+    from pathlib import Path
 
     sys.stdout.reconfigure(encoding="utf-8")
-    DATA_FILE = os.path.join(os.path.dirname(__file__), "RC_2023-12.zst")
+    DATA_FILE = str(Path(__file__).resolve().parent.parent.parent / "data" / "raw_dumps" / "RC_2023-12.zst")
     ingestor = ZstFileIngestor(DATA_FILE)
 
     for comment in itertools.islice(ingestor.stream(), 5):

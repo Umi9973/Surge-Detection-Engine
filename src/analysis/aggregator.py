@@ -5,13 +5,15 @@ import sys
 import time
 from collections import defaultdict, Counter
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Set
 
 from nltk.stem import SnowballStemmer
 
 _STEMMER = SnowballStemmer("english")
 
-DB_PATH = "G:\\Umi\\Python Projects\\Reddit Surge Detection\\anomalies.db"
+_ROOT   = Path(__file__).resolve().parent.parent.parent
+DB_PATH = str(_ROOT / "data" / "dbs" / "anomalies.db")
 
 WINDOW_SECONDS      = 7200   # 2-hour rolling window
 FLASH_OVERLAP       = 0.3    # cross-subreddit: lower threshold, vocabulary naturally diverges

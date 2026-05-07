@@ -3,13 +3,17 @@ from __future__ import annotations
 import random
 import sys
 import time
-from typing import List, Optional, Set
+from pathlib import Path
+from typing import List
 
 import fakeredis
-import numpy as np
 
-from ..models import AnomalyEvent, Comment
-from .state_manager import RedisStateManager, StateManager
+# Ensure project root is on the path when run as a script
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.models import AnomalyEvent, Comment
+from src.storage.state_manager import RedisStateManager
+from src.pipeline.sliding_tripwire import SlidingWindowTripwire
 
 TARGET_SUBREDDITS: List[str] = [
     "gaming", "Games", "pcgaming", "PS5", "XboxSeriesX", "NintendoSwitch",
@@ -17,88 +21,6 @@ TARGET_SUBREDDITS: List[str] = [
     "news", "worldnews",
 ]
 
-
-class SlidingWindowTripwire:
-    """Redis-backed sliding window anomaly detector.
-
-    Completely decoupled from storage: communicates only through the
-    StateManager interface, with no knowledge of Redis internals.
-
-    Tick contract:
-        evaluation_tick(now)  — called every 5 min. Fires AnomalyEvents.
-        baseline_tick(now)    — called every 1 hour. Commits count to history.
-        ingest(comment)       — called per incoming comment.
-    """
-
-    EVAL_INTERVAL     = 300    # 5 minutes
-    BASELINE_INTERVAL = 3600   # 1 hour
-    Z_THRESHOLD       = 3.0
-    MIN_HISTORY       = 2
-    VOLATILE_SUBS: Set[str] = {"news", "worldnews"}
-
-    def __init__(self, state: StateManager, subreddits: List[str]) -> None:
-        self.state      = state
-        self.subreddits = subreddits
-
-    def ingest(self, comment: Comment) -> None:
-        self.state.ingest(comment)
-
-    def baseline_tick(self, now: int) -> None:
-        """Record the current 2-hour window count into rolling history."""
-        for sub in self.subreddits:
-            count = self.state.get_window_count(sub, now)
-            self.state.push_history(sub, count)
-
-    def evaluation_tick(self, now: int) -> List[AnomalyEvent]:
-        """Evaluate every subreddit for anomalies. Returns fired events."""
-        events: List[AnomalyEvent] = []
-
-        for sub in self.subreddits:
-            if self.state.get_last_alert(sub) is not None:
-                continue  # cooldown active
-
-            count   = self.state.get_window_count(sub, now)
-            history = self.state.get_history(sub)
-
-            if len(history) < self.MIN_HISTORY:
-                continue  # cold start — not enough baseline
-
-            arr = np.array(history, dtype=float)
-
-            if sub in self.VOLATILE_SUBS:
-                median  = float(np.median(arr))
-                mad     = float(np.median(np.abs(arr - median)))
-                if mad == 0:
-                    continue  # flat baseline — any jitter looks infinite
-                z_score = (count - median) / (mad + 1e-6)
-                mean_val, std_val = median, mad
-            else:
-                mean_val = float(arr.mean())
-                std_val  = float(arr.std())
-                if std_val == 0:
-                    continue
-                z_score = (count - mean_val) / std_val
-
-            if z_score >= self.Z_THRESHOLD:
-                self.state.set_last_alert(sub, now)
-                texts = self.state.get_window_texts(sub, now)
-                events.append(AnomalyEvent(
-                    subreddit=sub,
-                    window_start=now - 7200,
-                    window_end=now,
-                    count=count,
-                    z_score=round(z_score, 2),
-                    texts=texts,
-                    mean=round(mean_val, 2),
-                    std=round(std_val, 2),
-                ))
-
-        return events
-
-
-# ---------------------------------------------------------------------------
-# Load test
-# ---------------------------------------------------------------------------
 
 def _make_comments(
     subreddit: str,
@@ -124,15 +46,15 @@ def run_load_test() -> None:
     print("  Redis Sliding Window — Load Test")
     print("=" * 70)
 
-    r       = fakeredis.FakeRedis(decode_responses=True)
-    state   = RedisStateManager(r)
+    r        = fakeredis.FakeRedis(decode_responses=True)
+    state    = RedisStateManager(r)
     tripwire = SlidingWindowTripwire(state, TARGET_SUBREDDITS)
 
-    BASE_TS   = 1_700_000_000   # arbitrary fixed epoch
-    HOUR      = 3600
+    BASE_TS = 1_700_000_000   # arbitrary fixed epoch
+    HOUR    = 3600
 
-    total_comments   = 0
-    total_anomalies  = 0
+    total_comments  = 0
+    total_anomalies = 0
     anomaly_log: List[AnomalyEvent] = []
 
     # 4 hours: 2 warmup (builds 2 clean baseline entries) + 1 spike + 1 cooldown verify
@@ -161,9 +83,9 @@ def run_load_test() -> None:
         # in the history yet — otherwise the spike inflates its own baseline.
         hour_anomalies = 0
         for tick in range(12):
-            now    = hour_start + (tick + 1) * SlidingWindowTripwire.EVAL_INTERVAL
-            t0     = time.perf_counter()
-            events = tripwire.evaluation_tick(now)
+            now     = hour_start + (tick + 1) * SlidingWindowTripwire.EVAL_INTERVAL
+            t0      = time.perf_counter()
+            events  = tripwire.evaluation_tick(now)
             tick_ms = (time.perf_counter() - t0) * 1000
 
             if events:
@@ -223,7 +145,7 @@ def run_load_test() -> None:
     # 4. Ask at BASE_TS + 3*HOUR + 7200 (= 2 hours after the spike hour ended).
     #    Window = [BASE_TS+3*HOUR, BASE_TS+3*HOUR+7200] — only hour-4 data lands here;
     #    hours 1-3 are all older than 7200s relative to this timestamp.
-    prune_now = BASE_TS + 3 * HOUR + 7200
+    prune_now    = BASE_TS + 3 * HOUR + 7200
     gaming_count = state.get_window_count("gaming", prune_now)
     expected_range = (80, 120)
     if expected_range[0] <= gaming_count <= expected_range[1]:

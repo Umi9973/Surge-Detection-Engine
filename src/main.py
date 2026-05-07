@@ -4,12 +4,13 @@ import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Iterator, List
 
-from context import DBSCANContextEngine
-from filter import SubredditFilter
-from ingestion import ZstFileIngestor
-from tripwire import TumblingWindowTripwire
+from .pipeline.context import DBSCANContextEngine
+from .pipeline.filter import SubredditFilter
+from .ingestion.ingestion import ZstFileIngestor
+from .pipeline.tripwire import TumblingWindowTripwire
 
 # --- Config ---
 TARGET_SUBREDDITS = [
@@ -21,8 +22,9 @@ TARGET_SUBREDDITS = [
 # Full November 2023 backtest — Nov 1 builds rolling history, Nov 2–30 is detection
 STREAM_CUTOFF_TS = 1701388800  # 2023-12-01 00:00:00 UTC
 
-DB_PATH   = os.path.join(os.path.dirname(__file__), "anomalies.db")
-DATA_FILE = os.path.join(os.path.dirname(__file__), "RC_2023-11.zst")
+_ROOT     = Path(__file__).resolve().parent.parent
+DB_PATH   = str(_ROOT / "data" / "dbs" / "anomalies.db")
+DATA_FILE = str(_ROOT / "data" / "raw_dumps" / "RC_2023-11.zst")
 
 
 # --- Database ---
