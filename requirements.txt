@@ -6,3 +6,4 @@ umap-learn
 nltk
 fakeredis
 redis
+psutil
