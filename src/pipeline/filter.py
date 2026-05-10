@@ -6,6 +6,8 @@ from typing import Dict, Iterator, List
 _BOT_AUTHORS: frozenset = frozenset({
     "AutoModerator", "reddit", "BotDefense", "RepostSleuthBot",
     "RemindMeBot", "sneakpeek_bot", "reddit-stream",
+    # HN system/moderator accounts
+    "dang", "pg",
 })
 
 # Boilerplate phrases that identify automated/bot content regardless of author name
@@ -15,6 +17,8 @@ _BOILERPLATE_PHRASES: tuple = (
     "please contact the moderators of this subreddit",
     "this is a reminder to",
     "^i ^am ^a ^bot",
+    # HN moderation notices
+    "this item has been flagged",
 )
 
 

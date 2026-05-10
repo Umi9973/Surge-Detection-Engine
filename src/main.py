@@ -7,10 +7,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List
 
+import fakeredis
+
+from .ingestion.hacker_news import HackerNewsIngestor
+from .ingestion.ingestion import ZstFileIngestor
+from .models import Comment
+from .pipeline.alert_gate import AlertGate
 from .pipeline.context import DBSCANContextEngine
 from .pipeline.filter import SubredditFilter
-from .ingestion.ingestion import ZstFileIngestor
+from .pipeline.sliding_tripwire import SlidingWindowTripwire
 from .pipeline.tripwire import TumblingWindowTripwire
+from .storage.state_manager import RedisStateManager
 
 # --- Config ---
 TARGET_SUBREDDITS = [
@@ -144,5 +151,82 @@ def run() -> None:
     conn.close()
 
 
+def _to_comment(raw: Dict) -> Comment:
+    return Comment(
+        id=raw.get("id", ""),
+        subreddit=raw.get("subreddit", ""),
+        body=raw.get("body", ""),
+        timestamp=int(raw.get("timestamp", 0)),
+        author=raw.get("author", ""),
+        score=int(raw.get("score", 0)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Live HN pipeline
+# ---------------------------------------------------------------------------
+
+TARGET_CHANNELS = ["ai", "security", "startup", "crypto", "science", "tech", "policy"]
+
+EVAL_INTERVAL     = SlidingWindowTripwire.EVAL_INTERVAL      # 300s
+BASELINE_INTERVAL = SlidingWindowTripwire.BASELINE_INTERVAL  # 3600s
+
+
+def live_hn(use_real_redis: bool = False) -> None:
+    sys.stdout.reconfigure(encoding="utf-8")
+
+    print("=" * 70)
+    print("  Reddit Surge Detection — Hacker News Live Feed")
+    print("=" * 70)
+
+    if use_real_redis:
+        import redis
+        r = redis.Redis(decode_responses=True)
+    else:
+        r = fakeredis.FakeRedis(decode_responses=True)
+
+    state    = RedisStateManager(r)
+    tripwire = SlidingWindowTripwire(state, TARGET_CHANNELS)
+    gate     = AlertGate()
+    ingestor = HackerNewsIngestor(poll_interval=5.0)
+    filter_  = SubredditFilter(TARGET_CHANNELS)
+
+    ticks: dict = {"eval": None, "base": None}
+
+    def fire_ticks(up_to: int) -> None:
+        while True:
+            e, b = ticks["eval"], ticks["base"]
+            if e is None or min(e, b) > up_to:
+                break
+            if e <= b:
+                raw_events = tripwire.evaluation_tick(e)
+                events     = gate.process(raw_events)
+                for ev in events:
+                    dt = datetime.fromtimestamp(ev.window_end, tz=timezone.utc).strftime("%b %d %H:%M UTC")
+                    print(
+                        f"  *** ANOMALY  {ev.subreddit:<12} | {dt} | "
+                        f"count={ev.count:>5} | z={ev.z_score} ***"
+                    )
+                ticks["eval"] = e + EVAL_INTERVAL
+            else:
+                tripwire.baseline_tick(b)
+                dt = datetime.fromtimestamp(b, tz=timezone.utc).strftime("%b %d %H:%M UTC")
+                print(f"  [baseline tick {dt}]")
+                ticks["base"] = b + BASELINE_INTERVAL
+
+    print("\n  Connecting to Hacker News Firebase API...")
+    print("  (First poll seeds _last_id — historical items are skipped)\n")
+
+    for raw in filter_.stream(ingestor.stream()):
+        ts = int(raw["timestamp"])
+
+        if ticks["eval"] is None:
+            ticks["eval"] = ((ts // EVAL_INTERVAL) + 1) * EVAL_INTERVAL
+            ticks["base"] = ((ts // BASELINE_INTERVAL) + 1) * BASELINE_INTERVAL
+
+        fire_ticks(ts - 1)
+        tripwire.ingest(_to_comment(raw))
+
+
 if __name__ == "__main__":
-    run()
+    live_hn()
