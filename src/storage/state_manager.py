@@ -9,10 +9,9 @@ import redis
 
 from ..models import Comment
 
-_WINDOW_TTL    = 7200   # 2-hour sliding window (seconds)
-_HISTORY_SIZE  = 24     # rolling hours kept for Z-score baseline
-_TEXT_CAP      = 500    # max comment texts passed to NLP
-_ALERT_COOLDOWN = 1800  # 30-minute per-subreddit alert cooldown (seconds)
+_WINDOW_TTL   = 7200   # 2-hour sliding window (seconds)
+_HISTORY_SIZE = 168    # 7 days × 24 hours — stable against multi-hour surges
+_TEXT_CAP     = 500    # max comment texts passed to NLP
 
 
 class StateManager(ABC):
@@ -43,14 +42,6 @@ class StateManager(ABC):
         """Append the current hourly count to the rolling history."""
 
     @abstractmethod
-    def get_last_alert(self, subreddit: str) -> Optional[int]:
-        """Return the Unix timestamp of the last alert, or None if cooldown has elapsed."""
-
-    @abstractmethod
-    def set_last_alert(self, subreddit: str, ts: int) -> None:
-        """Record that an alert fired at `ts`. Cooldown window starts now."""
-
-    @abstractmethod
     def flush(self) -> None:
         """Delete all keys — used to reset state between load-test runs."""
 
@@ -73,13 +64,11 @@ class RedisStateManager(StateManager):
         window_ttl:   int = _WINDOW_TTL,
         history_size: int = _HISTORY_SIZE,
         text_cap:     int = _TEXT_CAP,
-        alert_cooldown: int = _ALERT_COOLDOWN,
     ) -> None:
         self.r = r
-        self._window_ttl    = window_ttl
-        self._history_size  = history_size
-        self._text_cap      = text_cap
-        self._alert_cooldown = alert_cooldown
+        self._window_ttl   = window_ttl
+        self._history_size = history_size
+        self._text_cap     = text_cap
 
     # --- Ingestion ---
 
@@ -117,15 +106,6 @@ class RedisStateManager(StateManager):
         key = f"history:{subreddit}"
         self.r.rpush(key, count)
         self.r.ltrim(key, -self._history_size, -1)
-
-    # --- Alert cooldown ---
-
-    def get_last_alert(self, subreddit: str) -> Optional[int]:
-        val = self.r.get(f"alert:{subreddit}")
-        return int(val) if val is not None else None
-
-    def set_last_alert(self, subreddit: str, ts: int) -> None:
-        self.r.set(f"alert:{subreddit}", ts, ex=self._alert_cooldown)
 
     # --- Utility ---
 

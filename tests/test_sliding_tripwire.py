@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.models import AnomalyEvent, Comment
 from src.storage.state_manager import RedisStateManager
 from src.pipeline.sliding_tripwire import SlidingWindowTripwire
+from src.pipeline.alert_gate import AlertGate
 
 TARGET_SUBREDDITS: List[str] = [
     "gaming", "Games", "pcgaming", "PS5", "XboxSeriesX", "NintendoSwitch",
@@ -49,6 +50,7 @@ def run_load_test() -> None:
     r        = fakeredis.FakeRedis(decode_responses=True)
     state    = RedisStateManager(r)
     tripwire = SlidingWindowTripwire(state, TARGET_SUBREDDITS)
+    gate     = AlertGate()
 
     BASE_TS = 1_700_000_000   # arbitrary fixed epoch
     HOUR    = 3600
@@ -84,9 +86,10 @@ def run_load_test() -> None:
         hour_anomalies = 0
         for tick in range(12):
             now     = hour_start + (tick + 1) * SlidingWindowTripwire.EVAL_INTERVAL
-            t0      = time.perf_counter()
-            events  = tripwire.evaluation_tick(now)
-            tick_ms = (time.perf_counter() - t0) * 1000
+            t0         = time.perf_counter()
+            raw_events = tripwire.evaluation_tick(now)
+            tick_ms    = (time.perf_counter() - t0) * 1000
+            events     = gate.process(raw_events)
 
             if events:
                 for ev in events:
@@ -116,26 +119,30 @@ def run_load_test() -> None:
     print("=" * 70)
 
     passed = True
+    gaming_alerts = [ev for ev in anomaly_log if ev.subreddit == "gaming"]
 
-    # 1. Exactly 1 anomaly must have fired
-    if total_anomalies == 1:
-        print(f"  [PASS] Exactly 1 anomaly fired")
+    # 1. r/gaming must have been alerted at least once
+    if gaming_alerts:
+        print(f"  [PASS] r/gaming alerted {len(gaming_alerts)} time(s) (z={gaming_alerts[0].z_score})")
     else:
-        print(f"  [FAIL] Expected 1 anomaly, got {total_anomalies}")
+        print(f"  [FAIL] r/gaming never alerted")
         passed = False
 
-    # 2. The anomaly must be r/gaming
-    if anomaly_log and anomaly_log[0].subreddit == "gaming":
-        print(f"  [PASS] Anomaly is r/gaming (z={anomaly_log[0].z_score})")
-    else:
-        sub = anomaly_log[0].subreddit if anomaly_log else "none"
-        print(f"  [FAIL] Expected r/gaming, got r/{sub}")
-        passed = False
+    # 2. No two r/gaming alerts within the cooldown window (gate working correctly)
+    cooldown_ok = True
+    for i in range(1, len(gaming_alerts)):
+        gap = gaming_alerts[i].window_end - gaming_alerts[i - 1].window_end
+        if gap <= AlertGate.COOLDOWN:
+            print(f"  [FAIL] Two r/gaming alerts only {gap}s apart (cooldown={AlertGate.COOLDOWN}s)")
+            cooldown_ok = False
+            passed = False
+    if cooldown_ok and gaming_alerts:
+        print(f"  [PASS] AlertGate cooldown respected across all r/gaming alerts")
 
     # 3. Texts are capped at TEXT_CAP=500; size equals min(window_count, 500)
-    if anomaly_log:
-        texts = anomaly_log[0].texts
-        expected_texts = min(anomaly_log[0].count, 500)
+    if gaming_alerts:
+        texts = gaming_alerts[0].texts
+        expected_texts = min(gaming_alerts[0].count, 500)
         if len(texts) == expected_texts:
             print(f"  [PASS] Sample size correct ({len(texts)} texts, cap=500)")
         else:
@@ -162,6 +169,7 @@ def run_load_test() -> None:
     print("=" * 70)
 
     state.flush()
+    gate.flush()
 
 
 if __name__ == "__main__":

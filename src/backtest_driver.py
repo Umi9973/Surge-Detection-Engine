@@ -12,6 +12,8 @@ import fakeredis
 import psutil
 
 from .ingestion.ingestion import ZstFileIngestor
+from .pipeline.alert_gate import AlertGate
+from .pipeline.context import DBSCANContextEngine
 from .pipeline.filter import SubredditFilter
 from .pipeline.sliding_tripwire import SlidingWindowTripwire
 from .storage.state_manager import RedisStateManager
@@ -97,17 +99,30 @@ def _init_phase2_db(path: str) -> sqlite3.Connection:
     """Drop and recreate tables — guarantees a clean slate on every run."""
     conn = sqlite3.connect(path)
     conn.executescript("""
+        DROP TABLE IF EXISTS clusters;
+        DROP TABLE IF EXISTS anomaly_texts;
         DROP TABLE IF EXISTS anomalies;
         DROP TABLE IF EXISTS hourly_metrics;
         CREATE TABLE anomalies (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
             subreddit      TEXT    NOT NULL,
+            window_start   INTEGER NOT NULL,
             window_end     INTEGER NOT NULL,
             window_end_dt  TEXT    NOT NULL,
             count          INTEGER NOT NULL,
             z_score        REAL    NOT NULL,
             mean           REAL    NOT NULL,
             std            REAL    NOT NULL
+        );
+        CREATE TABLE clusters (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            anomaly_id  INTEGER NOT NULL,
+            keywords    TEXT    NOT NULL
+        );
+        CREATE TABLE anomaly_texts (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            anomaly_id  INTEGER NOT NULL,
+            text        TEXT    NOT NULL
         );
         CREATE TABLE hourly_metrics (
             hour_ts        INTEGER NOT NULL,
@@ -125,11 +140,18 @@ def _init_phase2_db(path: str) -> sqlite3.Connection:
 
 def _save_anomaly(conn: sqlite3.Connection, ev: AnomalyEvent) -> None:
     dt = datetime.fromtimestamp(ev.window_end, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    conn.execute(
-        "INSERT INTO anomalies (subreddit, window_end, window_end_dt, count, z_score, mean, std) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (ev.subreddit, ev.window_end, dt, ev.count, ev.z_score, ev.mean, ev.std),
+    cur = conn.execute(
+        "INSERT INTO anomalies "
+        "(subreddit, window_start, window_end, window_end_dt, count, z_score, mean, std) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (ev.subreddit, ev.window_start, ev.window_end, dt, ev.count, ev.z_score, ev.mean, ev.std),
     )
+    anomaly_id = cur.lastrowid
+    if ev.texts:
+        conn.executemany(
+            "INSERT INTO anomaly_texts (anomaly_id, text) VALUES (?, ?)",
+            [(anomaly_id, t) for t in ev.texts],
+        )
 
 
 def _save_metrics(conn: sqlite3.Connection, hour_ts: int, s: _HourStats, mem_mb: float) -> None:
@@ -183,6 +205,7 @@ def run() -> None:
     r        = fakeredis.FakeRedis(decode_responses=True)
     state    = RedisStateManager(r)
     tripwire = SlidingWindowTripwire(state, TARGET_SUBREDDITS)
+    gate     = AlertGate()
     ingestor = ZstFileIngestor(DATA_FILE)
     filter_  = SubredditFilter(TARGET_SUBREDDITS)
 
@@ -198,10 +221,11 @@ def run() -> None:
                 break
 
             if e <= b:
-                t0     = time.perf_counter()
-                events = tripwire.evaluation_tick(e)
+                t0         = time.perf_counter()
+                raw_events = tripwire.evaluation_tick(e)
                 stats.eval_ms    += (time.perf_counter() - t0) * 1000
                 stats.eval_calls += 1
+                events = gate.process(raw_events)
 
                 for ev in events:
                     phase2_anomalies.append(ev)
@@ -262,6 +286,43 @@ def run() -> None:
     fire_ticks(NOV_END)
     wall_sec = time.perf_counter() - wall_start
 
+    # --- NLP enrichment (runs after streaming so the main loop isn't paused) ---
+    _log(f"\n{'=' * 70}", lf)
+    _log(f"  NLP ENRICHMENT", lf)
+    _log(f"{'=' * 70}", lf)
+    _log(f"  Loading sentence-transformer model...", lf)
+
+    nlp_engine   = DBSCANContextEngine()
+    anomaly_rows = r2_conn.execute(
+        "SELECT id, subreddit, window_start FROM anomalies ORDER BY window_start"
+    ).fetchall()
+
+    total_clusters = 0
+    for (anomaly_id, subreddit, window_start) in anomaly_rows:
+        texts = [row[0] for row in r2_conn.execute(
+            "SELECT text FROM anomaly_texts WHERE anomaly_id = ?", (anomaly_id,)
+        ).fetchall()]
+
+        if not texts:
+            continue
+
+        clusters = nlp_engine.summarize_anomaly(texts, window_start=window_start)
+
+        for c in clusters:
+            r2_conn.execute(
+                "INSERT INTO clusters (anomaly_id, keywords) VALUES (?, ?)",
+                (anomaly_id, ", ".join(c["keywords"])),
+            )
+
+        if clusters:
+            total_clusters += len(clusters)
+            dt         = datetime.fromtimestamp(window_start, tz=timezone.utc).strftime("%b %d %H:%M UTC")
+            kw_preview = " | ".join(", ".join(c["keywords"][:4]) for c in clusters[:2])
+            _log(f"  r/{subreddit:<16} {dt}  {len(clusters)} cluster(s)  [{kw_preview}]", lf)
+
+    r2_conn.commit()
+    _log(f"\n  NLP done: {total_clusters} clusters across {len(anomaly_rows)} anomalies", lf)
+
     # --- Overall performance summary ---
     peak_mem = max(
         r2_conn.execute("SELECT MAX(memory_mb) FROM hourly_metrics").fetchone()[0] or 0,
@@ -306,6 +367,7 @@ def run() -> None:
     lf.close()
     r2_conn.close()
     state.flush()
+    gate.flush()
 
 
 if __name__ == "__main__":
