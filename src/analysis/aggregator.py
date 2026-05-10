@@ -33,6 +33,14 @@ AGGREGATOR_STOPWORDS: Set[str] = {
     "people", "person",
     "game", "play",
     "year", "new", "content",
+    # Automod/modbot template — every subreddit uses the same reply boilerplate,
+    # creating artificial cross-subreddit keyword overlap with zero topic signal.
+    "thank", "unfortunately", "deleted", "following", "reason", "per",
+    "hey", "scope", "limit", "rule",
+    # Image metadata artifacts — r/popculturechat and similar embed image URL
+    # fragments in comment bodies; DBSCAN clusters these as false "topics".
+    "jpeg", "pjpg", "webp", "width", "format", "gif", "giphy",
+    "redd", "auto", "preview",
 }
 
 _STEMMED_STOPWORDS: Set[str] = {_STEMMER.stem(w) for w in AGGREGATOR_STOPWORDS}
