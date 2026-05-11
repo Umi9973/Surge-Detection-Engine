@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import html as html_mod
 import queue
 import re
@@ -157,108 +158,37 @@ class _HTMLStripper(HTMLParser):
 
 
 # ---------------------------------------------------------------------------
-# Ingestor
+# Shared processing mixin
 # ---------------------------------------------------------------------------
 
-class HackerNewsIngestor(DataIngestor):
+class _HNItemProcessor:
     """
-    Streams new HN items in real-time using the Firebase REST API.
+    Shared classification and normalization logic for all HN ingestors.
 
-    Architecture: sync `stream()` drains a `queue.Queue` fed by a background
-    thread that runs a single persistent `aiohttp.ClientSession` for the
-    lifetime of the process. This avoids the asyncio.run()-per-cycle trap
-    (which destroys and re-creates the event loop and TCP connection pool on
-    every poll cycle).
+    Expects items in Firebase-compatible schema:
+        id       int         item ID
+        type     str         "story" | "comment"
+        title    str         story title (empty for comments)
+        text     str         comment body HTML (empty for stories)
+        url      str         story URL (empty for comments)
+        time     int         Unix timestamp
+        by       str         author username
+        score    int         upvotes (0 for comments)
+        parent   int|None    immediate parent ID (None for top-level stories)
+        deleted  bool        moderation flag
+        dead     bool        moderation flag
 
-    Comment tree inheritance: `_item_topics` is keyed by *any* item ID (story
-    or comment). When a story is classified, its ID → channel is cached. When a
-    comment arrives, its channel is looked up via `parent` (the immediate
-    parent's ID), and then the comment's own ID is also stored so its replies
-    can inherit. Items whose parent is not in cache are silently skipped.
+    Both HackerNewsIngestor (live Firebase) and HNCsvIngestor (CSV backtest)
+    normalize their source data to this schema before calling _process().
     """
 
-    BASE_URL   = "https://hacker-news.firebaseio.com/v0"
-    ITEM_TYPES = frozenset({"story", "comment"})
-
+    ITEM_TYPES  = frozenset({"story", "comment"})
     _EVICT_AT   = 50_000
     _EVICT_DROP = 10_000
 
-    def __init__(self, poll_interval: float = 5.0, concurrency: int = 20) -> None:
-        self._poll_interval = poll_interval
-        self._concurrency   = concurrency
-        self._last_id: int  = 0
+    def __init__(self) -> None:
         self._item_topics: Dict[int, str] = {}
         self._router = HNTopicRouter()
-
-    # ------------------------------------------------------------------
-    # Public sync interface
-    # ------------------------------------------------------------------
-
-    def stream(self) -> Iterator[Dict]:
-        """Sync generator. Blocks until items are available from the live feed."""
-        q: queue.Queue = queue.Queue(maxsize=1000)
-        t = threading.Thread(target=self._run_background, args=(q,), daemon=True)
-        t.start()
-        while True:
-            yield q.get()
-
-    # ------------------------------------------------------------------
-    # Background thread entry point
-    # ------------------------------------------------------------------
-
-    def _run_background(self, q: queue.Queue) -> None:
-        asyncio.run(self._async_main(q))
-
-    async def _async_main(self, q: queue.Queue) -> None:
-        async with aiohttp.ClientSession() as session:
-            await self._bootstrap(session)
-            while True:
-                items = await self._fetch_new(session)
-                for d in self._process(items):
-                    q.put(d)
-                await asyncio.sleep(self._poll_interval)
-
-    # ------------------------------------------------------------------
-    # Async helpers
-    # ------------------------------------------------------------------
-
-    async def _bootstrap(self, session: aiohttp.ClientSession) -> None:
-        """Seed _last_id to current maxitem so we skip all historical items."""
-        url = f"{self.BASE_URL}/maxitem.json"
-        async with session.get(url) as resp:
-            self._last_id = int(await resp.json())
-
-    async def _fetch_new(self, session: aiohttp.ClientSession) -> List[Dict]:
-        """Fetch all item IDs since _last_id concurrently."""
-        url = f"{self.BASE_URL}/maxitem.json"
-        async with session.get(url) as resp:
-            max_id = int(await resp.json())
-
-        if max_id <= self._last_id:
-            return []
-
-        new_ids = list(range(self._last_id + 1, max_id + 1))
-        self._last_id = max_id
-
-        sem = asyncio.Semaphore(self._concurrency)
-        tasks = [self._fetch_item(session, sem, item_id) for item_id in new_ids]
-        results = await asyncio.gather(*tasks)
-        return [r for r in results if r is not None]
-
-    async def _fetch_item(
-        self, session: aiohttp.ClientSession, sem: asyncio.Semaphore, item_id: int
-    ) -> Optional[Dict]:
-        async with sem:
-            url = f"{self.BASE_URL}/item/{item_id}.json"
-            try:
-                async with session.get(url) as resp:
-                    return await resp.json()
-            except Exception:
-                return None
-
-    # ------------------------------------------------------------------
-    # Classification + normalization
-    # ------------------------------------------------------------------
 
     def _process(self, items: List[Optional[Dict]]) -> Iterator[Dict]:
         for item in items:
@@ -285,7 +215,6 @@ class HackerNewsIngestor(DataIngestor):
                     continue
                 self._item_topics[item_id] = channel
 
-            # Evict oldest entries to cap memory
             if len(self._item_topics) > self._EVICT_AT:
                 keys_to_drop = list(self._item_topics.keys())[: self._EVICT_DROP]
                 for k in keys_to_drop:
@@ -299,11 +228,9 @@ class HackerNewsIngestor(DataIngestor):
 
     @staticmethod
     def _html_to_text(raw: str) -> str:
-        """Strip HTML tags and decode entities using stdlib html.parser."""
         stripper = _HTMLStripper()
         stripper.feed(raw)
-        text = stripper.get_text()
-        return html_mod.unescape(text)
+        return html_mod.unescape(stripper.get_text())
 
     @staticmethod
     def _to_dict(item: Dict, channel: str, body: str) -> Dict:
@@ -314,4 +241,123 @@ class HackerNewsIngestor(DataIngestor):
             "timestamp": item.get("time", 0),
             "author":    item.get("by", ""),
             "score":     item.get("score", 0),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Live ingestor (Firebase REST API)
+# ---------------------------------------------------------------------------
+
+class HackerNewsIngestor(DataIngestor, _HNItemProcessor):
+    """
+    Streams new HN items in real-time using the Firebase REST API.
+
+    Architecture: sync stream() drains a queue.Queue fed by a background
+    thread that runs a single persistent aiohttp.ClientSession for the
+    lifetime of the process. This avoids the asyncio.run()-per-cycle trap
+    (which destroys and re-creates the event loop and TCP connection pool on
+    every poll cycle).
+    """
+
+    BASE_URL = "https://hacker-news.firebaseio.com/v0"
+
+    def __init__(self, poll_interval: float = 5.0, concurrency: int = 20) -> None:
+        _HNItemProcessor.__init__(self)
+        self._poll_interval = poll_interval
+        self._concurrency   = concurrency
+        self._last_id: int  = 0
+
+    def stream(self) -> Iterator[Dict]:
+        q: queue.Queue = queue.Queue(maxsize=1000)
+        t = threading.Thread(target=self._run_background, args=(q,), daemon=True)
+        t.start()
+        while True:
+            yield q.get()
+
+    def _run_background(self, q: queue.Queue) -> None:
+        asyncio.run(self._async_main(q))
+
+    async def _async_main(self, q: queue.Queue) -> None:
+        async with aiohttp.ClientSession() as session:
+            await self._bootstrap(session)
+            while True:
+                items = await self._fetch_new(session)
+                for d in self._process(items):
+                    q.put(d)
+                await asyncio.sleep(self._poll_interval)
+
+    async def _bootstrap(self, session: aiohttp.ClientSession) -> None:
+        async with session.get(f"{self.BASE_URL}/maxitem.json") as resp:
+            self._last_id = int(await resp.json())
+
+    async def _fetch_new(self, session: aiohttp.ClientSession) -> List[Dict]:
+        async with session.get(f"{self.BASE_URL}/maxitem.json") as resp:
+            max_id = int(await resp.json())
+
+        if max_id <= self._last_id:
+            return []
+
+        new_ids = list(range(self._last_id + 1, max_id + 1))
+        self._last_id = max_id
+
+        sem = asyncio.Semaphore(self._concurrency)
+        tasks = [self._fetch_item(session, sem, item_id) for item_id in new_ids]
+        results = await asyncio.gather(*tasks)
+        return [r for r in results if r is not None]
+
+    async def _fetch_item(
+        self, session: aiohttp.ClientSession, sem: asyncio.Semaphore, item_id: int
+    ) -> Optional[Dict]:
+        async with sem:
+            try:
+                async with session.get(f"{self.BASE_URL}/item/{item_id}.json") as resp:
+                    return await resp.json()
+            except Exception:
+                return None
+
+
+# ---------------------------------------------------------------------------
+# CSV backtest ingestor
+# ---------------------------------------------------------------------------
+
+class HNCsvIngestor(DataIngestor, _HNItemProcessor):
+    """
+    Replays a HN CSV dump through the same pipeline as the live ingestor.
+
+    Expected CSV columns: id, type, author, timestamp, body, title, parent
+
+    Rows are sorted by timestamp before processing so the _item_topics cache
+    sees stories before their comments, matching real-time arrival order.
+    CSV field names are normalized to the Firebase-compatible schema that
+    _HNItemProcessor._process() expects before being passed through.
+    """
+
+    def __init__(self, file_path: str) -> None:
+        _HNItemProcessor.__init__(self)
+        self._file_path = file_path
+
+    def stream(self) -> Iterator[Dict]:
+        with open(self._file_path, newline="", encoding="utf-8") as f:
+            rows = sorted(csv.DictReader(f), key=lambda r: int(r["timestamp"]))
+
+        for row in rows:
+            normalized = self._normalize(row)
+            yield from self._process([normalized])
+
+    @staticmethod
+    def _normalize(row: Dict) -> Dict:
+        """Map CSV column names to the Firebase-compatible schema."""
+        parent_raw = row.get("parent", "")
+        return {
+            "id":      int(row["id"]),
+            "type":    row["type"],
+            "by":      row.get("author", ""),
+            "time":    int(row["timestamp"]),
+            "text":    row.get("body", ""),
+            "title":   row.get("title", ""),
+            "url":     "",
+            "score":   0,
+            "parent":  int(parent_raw) if parent_raw else None,
+            "deleted": False,
+            "dead":    False,
         }
