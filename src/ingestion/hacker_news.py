@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import html as html_mod
 import queue
+import re
 import threading
 from html.parser import HTMLParser
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -15,65 +17,126 @@ from .ingestion import DataIngestor
 # Topic router
 # ---------------------------------------------------------------------------
 
-TOPIC_CHANNELS: Dict[str, List[str]] = {
+# Each entry is (keyword, weight). Tiers:
+#   3 — exact brand/model names (unambiguous, high specificity)
+#   2 — domain jargon / multi-word phrases (strong signal, low FP risk)
+#   1 — generic single words (weak signal, never win a tie alone)
+TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
     "ai": [
-        "ai", "llm", "gpt", "openai", "anthropic", "claude", "gemini",
-        "machine learning", "deep learning", "neural", "chatgpt", "mistral", "llama",
+        ("gpt", 3), ("llm", 3), ("openai", 3), ("chatgpt", 3), ("anthropic", 3),
+        ("mistral", 3), ("llama", 3), ("gemini", 3), ("claude", 3),
+        ("machine learning", 2), ("deep learning", 2), ("neural network", 2),
+        ("neural", 1), ("ai", 1),
     ],
     "security": [
-        "security", "hack", "breach", "vulnerability", "malware", "ransomware",
-        "exploit", "zero-day", "cve", "phishing", "cybersecurity",
+        ("ransomware", 3), ("malware", 3), ("cve", 3), ("zero-day", 3),
+        ("cybersecurity", 2), ("vulnerability", 2), ("phishing", 2), ("exploit", 2),
+        ("breach", 1), ("hack", 1), ("security", 1),
     ],
     "startup": [
-        "startup", "vc", "funding", "series a", "series b", "acquired",
-        "acquisition", "ipo", "valuation", "seed", "venture",
+        ("series a", 3), ("series b", 3), ("series c", 3), ("ipo", 3),
+        ("acquisition", 2), ("acquired", 2), ("venture capital", 2), ("valuation", 2),
+        ("funding", 1), ("startup", 1), ("seed", 1),
     ],
     "crypto": [
-        "crypto", "bitcoin", "ethereum", "blockchain", "web3", "nft",
-        "defi", "solana", "binance", "coinbase",
+        ("bitcoin", 3), ("ethereum", 3), ("solana", 3), ("binance", 3), ("coinbase", 3),
+        ("blockchain", 2), ("defi", 2), ("web3", 2), ("nft", 2),
+        ("crypto", 1),
     ],
     "science": [
-        "research", "study", "paper", "journal", "discovery",
-        "physics", "biology", "chemistry", "climate",
+        ("arxiv", 3), ("crispr", 3), ("genomics", 3),
+        ("physics", 2), ("biology", 2), ("chemistry", 2), ("climate", 2), ("journal", 2),
+        ("discovery", 1), ("research", 1), ("study", 1), ("paper", 1),
     ],
     "tech": [
-        "google", "apple", "microsoft", "amazon", "meta",
-        "software", "hardware", "chip", "gpu", "nvidia", "amd",
+        ("nvidia", 3), ("amd", 3), ("apple", 3), ("google", 3), ("microsoft", 3),
+        ("amazon", 3), ("meta", 3),
+        ("gpu", 2), ("chip", 2), ("hardware", 2),
+        ("software", 1),
     ],
     "policy": [
-        "regulation", "law", "court", "congress", "senate", "election",
-        "government", "policy", "ban", "gdpr", "antitrust",
+        ("gdpr", 3), ("antitrust", 3), ("sec", 3), ("congress", 3), ("senate", 3),
+        ("regulation", 2), ("court", 2), ("government", 2), ("election", 2),
+        ("law", 1), ("policy", 1), ("ban", 1),
     ],
 }
 
-# Channel priority order for tie-breaking (most specific first)
-_PRIORITY: List[str] = ["ai", "security", "crypto", "startup", "policy", "science", "tech"]
+# Domain → (channel, boost_weight). Exact netloc match after stripping www.
+DOMAIN_BOOSTS: Dict[str, Tuple[str, float]] = {
+    "github.com":          ("tech",     2),
+    "arxiv.org":           ("science",  3),
+    "techcrunch.com":      ("startup",  2),
+    "sec.gov":             ("policy",   3),
+    "reuters.com":         ("policy",   1),
+    "bloomberg.com":       ("startup",  1),
+    "wired.com":           ("tech",     1),
+    "arstechnica.com":     ("tech",     1),
+    "theregister.com":     ("security", 2),
+    "krebsonsecurity.com": ("security", 3),
+    "coindesk.com":        ("crypto",   3),
+    "nature.com":          ("science",  3),
+    "science.org":         ("science",  3),
+}
+
+# Channel priority order for tie-breaking. "general" is last — it's the catch-all,
+# never a winner when any topical channel has scored.
+_PRIORITY: List[str] = [
+    "ai", "security", "crypto", "startup", "policy", "science", "tech", "general",
+]
+
+# Keywords where we want left-boundary only so inflected forms match:
+# hack → hacker/hacked/hacking, breach → breached/breaching, exploit → exploited/exploiting
+_PREFIX_ROOTS: frozenset = frozenset({"hack", "breach", "exploit"})
+
+
+def _build_pattern(kw: str) -> re.Pattern:
+    escaped = re.escape(kw)
+    if kw in _PREFIX_ROOTS:
+        return re.compile(r"\b" + escaped, re.IGNORECASE)
+    return re.compile(r"\b" + escaped + r"\b", re.IGNORECASE)
+
+
+def _extract_domain(url: str) -> str:
+    host = urlparse(url).netloc.lower()
+    return host[4:] if host.startswith("www.") else host
 
 
 class HNTopicRouter:
-    """Classify an HN story title into a virtual channel by keyword density."""
+    """
+    Classify an HN story title (+ optional URL) into a virtual channel.
+
+    Scoring: sum of weights of matched keywords (regex word-boundary safe).
+    Domain boosts are added on top. Returns 'general' when score is zero.
+    """
 
     def __init__(self) -> None:
-        self._channels = list(TOPIC_CHANNELS.items())
+        self._patterns: Dict[str, List[Tuple[re.Pattern, float]]] = {
+            channel: [(_build_pattern(kw), weight) for kw, weight in entries]
+            for channel, entries in TOPIC_CHANNELS.items()
+        }
 
-    def classify(self, title: str) -> Optional[str]:
-        """Return channel with the most keyword hits, or None if no match."""
-        lower = title.lower()
-        scores: Dict[str, int] = {}
-        for channel, keywords in self._channels:
-            hits = sum(1 for kw in keywords if kw in lower)
-            if hits:
-                scores[channel] = hits
+    def classify(self, title: str, url: Optional[str] = None) -> str:
+        """Return channel with highest weighted score, or 'general' if zero."""
+        scores: Dict[str, float] = {}
+
+        for channel, pat_weights in self._patterns.items():
+            total = sum(w for pat, w in pat_weights if pat.search(title))
+            if total > 0:
+                scores[channel] = total
+
+        if url:
+            domain = _extract_domain(url)
+            if domain in DOMAIN_BOOSTS:
+                ch, boost = DOMAIN_BOOSTS[domain]
+                scores[ch] = scores.get(ch, 0) + boost
 
         if not scores:
-            return None
+            return "general"
 
         best_score = max(scores.values())
-        # Among channels tied at best_score, pick by priority order
         for channel in _PRIORITY:
-            if scores.get(channel) == best_score:
+            if scores.get(channel, 0) == best_score:
                 return channel
-        # Fallback: return any channel at best_score (shouldn't be reached)
         return max(scores, key=scores.__getitem__)
 
 
@@ -90,7 +153,6 @@ class _HTMLStripper(HTMLParser):
         self._parts.append(data)
 
     def get_text(self) -> str:
-        import re
         return re.sub(r"\s+", " ", " ".join(self._parts)).strip()
 
 
@@ -210,10 +272,8 @@ class HackerNewsIngestor(DataIngestor):
                 continue
 
             if item["type"] == "story":
-                title = item.get("title", "")
-                channel = self._router.classify(title)
-                if channel is None:
-                    continue
+                title   = item.get("title", "")
+                channel = self._router.classify(title, url=item.get("url", ""))
                 self._item_topics[item_id] = channel
 
             else:  # comment

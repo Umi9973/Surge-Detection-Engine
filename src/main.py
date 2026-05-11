@@ -166,7 +166,7 @@ def _to_comment(raw: Dict) -> Comment:
 # Live HN pipeline
 # ---------------------------------------------------------------------------
 
-TARGET_CHANNELS = ["ai", "security", "startup", "crypto", "science", "tech", "policy"]
+TARGET_CHANNELS = ["ai", "security", "startup", "crypto", "science", "tech", "policy", "general"]
 
 EVAL_INTERVAL     = SlidingWindowTripwire.EVAL_INTERVAL      # 300s
 BASELINE_INTERVAL = SlidingWindowTripwire.BASELINE_INTERVAL  # 3600s
