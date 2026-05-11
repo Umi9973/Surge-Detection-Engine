@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 import json
-from abc import ABC, abstractmethod
 from typing import Dict, Iterator
 
 import zstandard as zstd
 
-
-class DataIngestor(ABC):
-    @abstractmethod
-    def stream(self) -> Iterator[Dict]:
-        raise NotImplementedError
+from .base import DataIngestor
 
 
 class ZstFileIngestor(DataIngestor):

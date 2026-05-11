@@ -11,7 +11,7 @@ from typing import IO, List
 import fakeredis
 import psutil
 
-from .ingestion.ingestion import ZstFileIngestor
+from .ingestion.reddit import ZstFileIngestor
 from .pipeline.alert_gate import AlertGate
 from .pipeline.context import DBSCANContextEngine
 from .pipeline.filter import SubredditFilter

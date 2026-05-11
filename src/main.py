@@ -10,7 +10,7 @@ from typing import Dict, Iterator, List
 import fakeredis
 
 from .ingestion.hacker_news import HackerNewsIngestor
-from .ingestion.ingestion import ZstFileIngestor
+from .ingestion.reddit import ZstFileIngestor
 from .models import Comment
 from .pipeline.alert_gate import AlertGate
 from .pipeline.context import DBSCANContextEngine

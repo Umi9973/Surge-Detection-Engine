@@ -117,7 +117,7 @@ if __name__ == "__main__":
     _root = Path(__file__).resolve().parent.parent.parent
     sys.path.insert(0, str(_root))
 
-    from src.ingestion.ingestion import ZstFileIngestor
+    from src.ingestion.reddit import ZstFileIngestor
     from src.pipeline.filter import SubredditFilter
 
     TARGET_SUBREDDITS = [

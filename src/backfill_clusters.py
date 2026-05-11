@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
-from .ingestion.ingestion import ZstFileIngestor
+from .ingestion.reddit import ZstFileIngestor
 from .pipeline.context import DBSCANContextEngine
 
 _ROOT     = Path(__file__).resolve().parent.parent

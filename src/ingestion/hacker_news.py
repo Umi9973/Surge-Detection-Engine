@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 
-from .ingestion import DataIngestor
+from .base import DataIngestor
 
 # ---------------------------------------------------------------------------
 # Topic router
