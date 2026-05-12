@@ -23,7 +23,7 @@ TARGET_CHANNELS = [
 ]
 
 _ROOT       = Path(__file__).resolve().parent.parent
-CSV_FILE    = str(_ROOT / "data" / "raw_dumps" / "HN_2023-11.csv")
+CSV_FILE    = str(_ROOT / "data" / "raw_dumps" / "HN_2023_Nov8-23.csv")
 HN_DB       = str(_ROOT / "data" / "dbs" / "anomalies_hn_nov.db")
 LOG_DIR     = _ROOT / "data" / "logs"
 LATEST_LOG  = LOG_DIR / "hn_backtest_latest.txt"
@@ -31,6 +31,10 @@ PARQUET_DIR = _ROOT / "data" / "parquet"
 
 EVAL_INTERVAL     = SlidingWindowTripwire.EVAL_INTERVAL      # 300s
 BASELINE_INTERVAL = SlidingWindowTripwire.BASELINE_INTERVAL  # 3600s
+MIN_HISTORY       = SlidingWindowTripwire.MIN_HISTORY        # 24 hourly samples
+
+BURN_IN_DAYS = 7
+BURN_IN_SEC  = BURN_IN_DAYS * 86400
 
 
 # ---------------------------------------------------------------------------
@@ -128,8 +132,9 @@ def run() -> None:
     run_ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     _log("=" * 70, lf)
-    _log(f"  HN Backtest Driver — Nov 15–22 2023 (Sam Altman Saga)", lf)
+    _log(f"  HN Backtest Driver — Nov 8–22 2023 (Sam Altman Saga)", lf)
     _log(f"  Run started : {run_ts}", lf)
+    _log(f"  Burn-in     : {BURN_IN_DAYS} days  (MIN_HISTORY={MIN_HISTORY})", lf)
     _log(f"  Input CSV   : {Path(CSV_FILE).name}", lf)
     _log(f"  Output DB   : {Path(HN_DB).name}", lf)
     _log("=" * 70, lf)
@@ -145,29 +150,42 @@ def run() -> None:
     anomalies: List[AnomalyEvent] = []
     total_items = 0
     ticks: dict = {"eval": None, "base": None}
+    detection_start_ts:    int = 0
+    baseline_sample_count: int = 0
 
     def fire_ticks(up_to: int) -> None:
+        nonlocal baseline_sample_count  # closure mutates a primitive — see plan note
         while True:
             e, b = ticks["eval"], ticks["base"]
             if e is None or min(e, b) > up_to:
                 break
             if e <= b:
-                raw_events = tripwire.evaluation_tick(e)
-                events     = gate.process(raw_events)
-                for ev in events:
-                    anomalies.append(ev)
-                    _save_anomaly(conn, ev)
-                    dt = datetime.fromtimestamp(ev.window_end, tz=timezone.utc).strftime("%b %d %H:%M UTC")
-                    _log(
-                        f"  *** ANOMALY  {ev.subreddit:<12} | {dt} | "
-                        f"count={ev.count:>5} | z={ev.z_score} ***",
-                        lf,
-                    )
+                if e >= detection_start_ts:
+                    raw_events = tripwire.evaluation_tick(e)
+                    events     = gate.process(raw_events)
+                    for ev in events:
+                        anomalies.append(ev)
+                        _save_anomaly(conn, ev)
+                        dt = datetime.fromtimestamp(ev.window_end, tz=timezone.utc).strftime("%b %d %H:%M UTC")
+                        _log(
+                            f"  *** ANOMALY  {ev.subreddit:<12} | {dt} | "
+                            f"count={ev.count:>5} | z={ev.z_score} ***",
+                            lf,
+                        )
+                # else: burn-in — evaluation tick skipped; Schmitt trigger stays clean
                 ticks["eval"] = e + EVAL_INTERVAL
             else:
                 tripwire.baseline_tick(b)
+                baseline_sample_count += 1
                 dt = datetime.fromtimestamp(b, tz=timezone.utc).strftime("%b %d %H:%M UTC")
-                _log(f"  [baseline {dt}]  items ingested so far: {total_items:,}", lf)
+                if b < detection_start_ts:
+                    _log(
+                        f"  [burn-in {baseline_sample_count:>3}/{MIN_HISTORY}] {dt}"
+                        f"  items: {total_items:,}",
+                        lf,
+                    )
+                else:
+                    _log(f"  [baseline {dt}]  items ingested so far: {total_items:,}", lf)
                 conn.commit()
                 ticks["base"] = b + BASELINE_INTERVAL
 
@@ -180,6 +198,11 @@ def run() -> None:
         if ticks["eval"] is None:
             ticks["eval"] = ((ts // EVAL_INTERVAL) + 1) * EVAL_INTERVAL
             ticks["base"] = ((ts // BASELINE_INTERVAL) + 1) * BASELINE_INTERVAL
+            # snap to midnight UTC of first data day + BURN_IN_DAYS
+            # note: actual burn-in may be slightly < 168h (see plan — intentional)
+            detection_start_ts = ((ts // 86400) + BURN_IN_DAYS) * 86400
+            det_str = datetime.fromtimestamp(detection_start_ts, tz=timezone.utc).strftime("%b %d %H:%M UTC")
+            _log(f"  Detection opens : {det_str}", lf)
 
         fire_ticks(ts - 1)
         tripwire.ingest(_to_comment(raw))

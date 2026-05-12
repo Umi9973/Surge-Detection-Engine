@@ -107,6 +107,37 @@ This document tracks significant architectural challenges, bugs, and bottlenecks
 
 ---
 
+### [CLOSED] Issue #8: Cold-start baseline produces false-positive flood on pipeline launch
+
+* **Date Opened:** 2026-05-12
+* **Date Closed:** 2026-05-12
+* **Phase:** Phase 2 — Live Sliding Window Pipeline
+* **The Problem:** When the pipeline starts with an empty Redis baseline (zero history), the first 12–24 hours generate an overwhelming number of false-positive anomalies. The HN Nov 15–22 backtest (old narrow CSV) produced 1,470 post-AlertGate alerts over 8 days, with the vast majority concentrated on Nov 15–16 — days where the Sam Altman firing had not yet occurred and no genuine surge was happening. In a live Discord-connected deployment this translates to hundreds of meaningless notifications before the baseline stabilises.
+* **Root Cause:** `SlidingWindowTripwire` required only `MIN_HISTORY = 2` baseline samples before firing. With 2 samples, the standard deviation is computed from an almost-flat distribution. A typical early pattern is `history = [1, 3]` (mean=2, std=1). The first moderately active 5-minute window (count=20) produces `z = (20 − 2) / 1 = 18.0` — well above the `Z_THRESHOLD = 3.0` trigger. This is statistically meaningless: 2 samples are not enough to characterise the ambient noise floor of any channel.
+* **Measured Impact:** HN backtest Nov 15 00:00–16 23:59 UTC: ~1,200 of the 1,470 total alerts were cold-start false positives.
+* **The Resolution (two complementary fixes):**
+  1. **`MIN_HISTORY = 2 → 24`** in `SlidingWindowTripwire` — `_compute_z()` returns `None` until 24 hourly baseline samples exist. One full day covers the diurnal cycle, giving the standard deviation a realistic floor. Protects both the live pipeline (against Redis wipes/reboots) and the backtest.
+  2. **7-day burn-in period** in `hn_backtest_driver.py` — the detection window is suppressed for the first 7 days of CSV data (`detection_start_ts`). Evaluation ticks are skipped entirely during burn-in (keeping the Schmitt trigger clean); baseline ticks always run. Logged as `[burn-in N/24]` so the operator can track warmup progress. Detection opens at midnight UTC of Day 8.
+* **Result:** HN backtest (wider CSV, Nov 8–22) with both fixes: **1,470 → 381 anomalies** (−74%). All remaining anomalies start from Nov 15 onward and carry legitimate NLP clusters (`board, sam, altman, openai, fired`). Zero cold-start false positives.
+* **Note on midnight alignment:** `detection_start_ts` snaps to midnight UTC of the burn-in boundary, not exactly 168h from the first CSV item. If the CSV starts at 14:00 UTC Nov 8, the window opens Nov 15 00:00 UTC (154 hourly samples, not 168). This is acceptable — 154 >> 24 and the midnight boundary makes logs cleaner.
+* **Key Takeaway:** Statistical anomaly detection requires a statistically valid baseline. `MIN_HISTORY = 2` satisfies the code contract but not the math contract. The burn-in fixes the backtest; the MIN_HISTORY gate is the always-on production guard against any cold-start scenario.
+
+---
+
+### [CLOSED] Issue #9: Low-volume channels generating false positives from tiny absolute counts
+
+* **Date Opened:** 2026-05-12
+* **Date Closed:** 2026-05-12
+* **Phase:** Phase 2 — Live Sliding Window Pipeline
+* **The Problem:** After the Issue #8 burn-in fix, 381 anomalies remained in the HN Nov 8–22 backtest. Inspecting by channel revealed that the `startup` channel was firing repeated alerts with `count=3` or `count=4` — e.g., `count=4, z=3.69` at Nov 15 04:15 UTC. These are statistically elevated but operationally meaningless. 54 of the 381 startup anomalies were this pattern; about 31 across all channels were pure low-count noise.
+* **Root Cause:** Low-volume channels (startup, crypto at off-peak hours) have near-zero ambient activity. A baseline of `[0, 1, 1, 0, ...]` produces a mean ≈ 0.5 and std ≈ 0.5. A window with count=4 yields `z = (4 − 0.5) / 0.5 = 7.0` — high enough to trigger ELEVATED and hold it. The Z-score math is technically correct, but 4 items in a 5-minute window is not an actionable signal regardless of Z.
+* **Measured Impact:** 31 anomalies across startup/crypto/science were count < 10 noise. In production these would generate Discord notifications for events with single-digit item counts.
+* **The Resolution:** Added `MIN_COUNT = 10` class constant to `SlidingWindowTripwire`. In `evaluation_tick()`, if `count < MIN_COUNT` and the channel is not already `ELEVATED`, skip the channel entirely (no Z computation, no state change). If the channel is already ELEVATED, the check is bypassed so the Schmitt trigger release logic can still run — preventing channels from being stuck ELEVATED after a real surge winds down to low counts.
+* **Result:** **381 → 350 anomalies** (−31). All remaining startup anomalies have count ≥ 10 and correspond to genuine Sam Altman–driven activity on Nov 15 and Nov 21–22.
+* **Key Takeaway:** Z-score alone is not sufficient to qualify an anomaly on low-volume channels. A high Z from a near-zero baseline is a statistical artefact, not a signal. A minimum absolute count floor separates "statistically unusual" from "operationally interesting". The floor must not block the ELEVATED release path — gating only the entry transition preserves the Schmitt trigger's clean exit behaviour.
+
+---
+
 ### [CLOSED] Issue #7: AGGREGATOR_STOPWORDS applied before stemming — inflected forms bypass filter
 
 * **Date Opened:** 2026-05-06

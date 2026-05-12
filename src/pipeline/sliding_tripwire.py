@@ -31,7 +31,8 @@ class SlidingWindowTripwire:
     BASELINE_INTERVAL = 3600   # 1 hour
     Z_THRESHOLD       = 3.0    # trigger: event begins
     RELEASE_THRESHOLD = 2.0    # release: event ends
-    MIN_HISTORY       = 2
+    MIN_HISTORY       = 24   # require 24 hourly baseline samples before alerting
+    MIN_COUNT         = 10   # ignore windows with fewer than 10 items (low-volume noise)
     VOLATILE_SUBS: Set[str] = {"news", "worldnews"}
 
     def __init__(self, state: StateManager, subreddits: List[str]) -> None:
@@ -100,14 +101,20 @@ class SlidingWindowTripwire:
         events: List[AnomalyEvent] = []
 
         for sub in self.subreddits:
-            count   = self.state.get_window_count(sub, now)
+            count    = self.state.get_window_count(sub, now)
+            elevated = self._elevated.get(sub, False)
+
+            # Block low-volume windows from triggering ELEVATED; if already
+            # elevated, still run so the Schmitt trigger can release cleanly.
+            if count < self.MIN_COUNT and not elevated:
+                continue
+
             history = self.state.get_history(sub)
             result  = self._compute_z(sub, count, history)
             if result is None:
                 continue
 
             z_score, mean_val, std_val = result
-            elevated = self._elevated.get(sub, False)
 
             if not elevated and z_score >= self.Z_THRESHOLD:
                 self._elevated[sub] = True
