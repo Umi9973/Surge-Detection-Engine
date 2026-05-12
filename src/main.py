@@ -9,6 +9,7 @@ from typing import Dict, Iterator, List
 
 import fakeredis
 
+from .alerting.webhooks import WebhookDispatcher
 from .ingestion.hacker_news import HackerNewsIngestor
 from .ingestion.reddit import ZstFileIngestor
 from .models import Comment
@@ -192,7 +193,8 @@ def live_hn(use_real_redis: bool = False) -> None:
     gate     = AlertGate()
     ingestor = HackerNewsIngestor(poll_interval=5.0)
     filter_  = SubredditFilter(TARGET_CHANNELS)
-    nlp      = DBSCANContextEngine()
+    nlp        = DBSCANContextEngine()
+    dispatcher = WebhookDispatcher()   # reads WEBHOOK_URL from env; no-op if unset
 
     ticks: dict = {"eval": None, "base": None}
 
@@ -211,6 +213,7 @@ def live_hn(use_real_redis: bool = False) -> None:
                                if ev.texts else []
                     flat_kw  = [kw for c in clusters for kw in c["keywords"]]
                     archiver.archive(ev, flat_kw)
+                    dispatcher.dispatch(ev, flat_kw)
                     dt = datetime.fromtimestamp(ev.window_end, tz=timezone.utc).strftime("%b %d %H:%M UTC")
                     print(
                         f"  *** ANOMALY  {ev.subreddit:<12} | {dt} | "
