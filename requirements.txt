@@ -7,3 +7,4 @@ nltk
 fakeredis
 redis
 psutil
+pyarrow

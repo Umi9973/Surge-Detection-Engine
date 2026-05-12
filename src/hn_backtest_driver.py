@@ -15,17 +15,19 @@ from .pipeline.alert_gate import AlertGate
 from .pipeline.context import DBSCANContextEngine
 from .pipeline.filter import SubredditFilter
 from .pipeline.sliding_tripwire import SlidingWindowTripwire
+from .storage.parquet_archiver import ParquetArchiver
 from .storage.state_manager import RedisStateManager
 
 TARGET_CHANNELS = [
     "ai", "security", "startup", "crypto", "science", "tech", "policy", "general",
 ]
 
-_ROOT     = Path(__file__).resolve().parent.parent
-CSV_FILE  = str(_ROOT / "data" / "raw_dumps" / "HN_2023-11.csv")
-HN_DB     = str(_ROOT / "data" / "dbs" / "anomalies_hn_nov.db")
-LOG_DIR   = _ROOT / "data" / "logs"
-LATEST_LOG = LOG_DIR / "hn_backtest_latest.txt"
+_ROOT       = Path(__file__).resolve().parent.parent
+CSV_FILE    = str(_ROOT / "data" / "raw_dumps" / "HN_2023-11.csv")
+HN_DB       = str(_ROOT / "data" / "dbs" / "anomalies_hn_nov.db")
+LOG_DIR     = _ROOT / "data" / "logs"
+LATEST_LOG  = LOG_DIR / "hn_backtest_latest.txt"
+PARQUET_DIR = _ROOT / "data" / "parquet"
 
 EVAL_INTERVAL     = SlidingWindowTripwire.EVAL_INTERVAL      # 300s
 BASELINE_INTERVAL = SlidingWindowTripwire.BASELINE_INTERVAL  # 3600s
@@ -200,27 +202,37 @@ def run() -> None:
         "SELECT id, channel, window_start FROM anomalies ORDER BY window_start"
     ).fetchall()
 
+    events_by_key: dict = {
+        (ev.subreddit, ev.window_start): ev for ev in anomalies
+    }
+
     total_clusters = 0
-    for (anomaly_id, channel, window_start) in anomaly_rows:
-        texts = [row[0] for row in conn.execute(
-            "SELECT text FROM anomaly_texts WHERE anomaly_id = ?", (anomaly_id,)
-        ).fetchall()]
+    with ParquetArchiver(PARQUET_DIR) as archiver:
+        for (anomaly_id, channel, window_start) in anomaly_rows:
+            texts = [row[0] for row in conn.execute(
+                "SELECT text FROM anomaly_texts WHERE anomaly_id = ?", (anomaly_id,)
+            ).fetchall()]
 
-        if not texts:
-            continue
+            if not texts:
+                continue
 
-        clusters = nlp_engine.summarize_anomaly(texts, window_start=window_start)
-        for c in clusters:
-            conn.execute(
-                "INSERT INTO clusters (anomaly_id, keywords) VALUES (?, ?)",
-                (anomaly_id, ", ".join(c["keywords"])),
-            )
+            clusters = nlp_engine.summarize_anomaly(texts, window_start=window_start)
+            for c in clusters:
+                conn.execute(
+                    "INSERT INTO clusters (anomaly_id, keywords) VALUES (?, ?)",
+                    (anomaly_id, ", ".join(c["keywords"])),
+                )
 
-        if clusters:
-            total_clusters += len(clusters)
-            dt         = datetime.fromtimestamp(window_start, tz=timezone.utc).strftime("%b %d %H:%M UTC")
-            kw_preview = " | ".join(", ".join(c["keywords"][:4]) for c in clusters[:2])
-            _log(f"  {channel:<12} {dt}  {len(clusters)} cluster(s)  [{kw_preview}]", lf)
+            flat_kw = [kw for c in clusters for kw in c["keywords"]]
+            ev = events_by_key.get((channel, window_start))
+            if ev:
+                archiver.archive(ev, flat_kw)
+
+            if clusters:
+                total_clusters += len(clusters)
+                dt         = datetime.fromtimestamp(window_start, tz=timezone.utc).strftime("%b %d %H:%M UTC")
+                kw_preview = " | ".join(", ".join(c["keywords"][:4]) for c in clusters[:2])
+                _log(f"  {channel:<12} {dt}  {len(clusters)} cluster(s)  [{kw_preview}]", lf)
 
     conn.commit()
     _log(f"\n  NLP done: {total_clusters} clusters across {len(anomaly_rows)} anomalies", lf)

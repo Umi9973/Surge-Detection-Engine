@@ -17,6 +17,7 @@ from .pipeline.context import DBSCANContextEngine
 from .pipeline.filter import SubredditFilter
 from .pipeline.sliding_tripwire import SlidingWindowTripwire
 from .pipeline.tripwire import TumblingWindowTripwire
+from .storage.parquet_archiver import ParquetArchiver
 from .storage.state_manager import RedisStateManager
 
 # --- Config ---
@@ -29,9 +30,10 @@ TARGET_SUBREDDITS = [
 # Full November 2023 backtest — Nov 1 builds rolling history, Nov 2–30 is detection
 STREAM_CUTOFF_TS = 1701388800  # 2023-12-01 00:00:00 UTC
 
-_ROOT     = Path(__file__).resolve().parent.parent
-DB_PATH   = str(_ROOT / "data" / "dbs" / "anomalies.db")
-DATA_FILE = str(_ROOT / "data" / "raw_dumps" / "RC_2023-11.zst")
+_ROOT       = Path(__file__).resolve().parent.parent
+DB_PATH     = str(_ROOT / "data" / "dbs" / "anomalies.db")
+DATA_FILE   = str(_ROOT / "data" / "raw_dumps" / "RC_2023-11.zst")
+PARQUET_DIR = _ROOT / "data" / "parquet"
 
 
 # --- Database ---
@@ -190,8 +192,11 @@ def live_hn(use_real_redis: bool = False) -> None:
     gate     = AlertGate()
     ingestor = HackerNewsIngestor(poll_interval=5.0)
     filter_  = SubredditFilter(TARGET_CHANNELS)
+    nlp      = DBSCANContextEngine()
 
     ticks: dict = {"eval": None, "base": None}
+
+    archiver = ParquetArchiver(PARQUET_DIR)
 
     def fire_ticks(up_to: int) -> None:
         while True:
@@ -202,6 +207,10 @@ def live_hn(use_real_redis: bool = False) -> None:
                 raw_events = tripwire.evaluation_tick(e)
                 events     = gate.process(raw_events)
                 for ev in events:
+                    clusters = nlp.summarize_anomaly(ev.texts, window_start=ev.window_start) \
+                               if ev.texts else []
+                    flat_kw  = [kw for c in clusters for kw in c["keywords"]]
+                    archiver.archive(ev, flat_kw)
                     dt = datetime.fromtimestamp(ev.window_end, tz=timezone.utc).strftime("%b %d %H:%M UTC")
                     print(
                         f"  *** ANOMALY  {ev.subreddit:<12} | {dt} | "
@@ -217,15 +226,18 @@ def live_hn(use_real_redis: bool = False) -> None:
     print("\n  Connecting to Hacker News Firebase API...")
     print("  (First poll seeds _last_id — historical items are skipped)\n")
 
-    for raw in filter_.stream(ingestor.stream()):
-        ts = int(raw["timestamp"])
+    try:
+        for raw in filter_.stream(ingestor.stream()):
+            ts = int(raw["timestamp"])
 
-        if ticks["eval"] is None:
-            ticks["eval"] = ((ts // EVAL_INTERVAL) + 1) * EVAL_INTERVAL
-            ticks["base"] = ((ts // BASELINE_INTERVAL) + 1) * BASELINE_INTERVAL
+            if ticks["eval"] is None:
+                ticks["eval"] = ((ts // EVAL_INTERVAL) + 1) * EVAL_INTERVAL
+                ticks["base"] = ((ts // BASELINE_INTERVAL) + 1) * BASELINE_INTERVAL
 
-        fire_ticks(ts - 1)
-        tripwire.ingest(_to_comment(raw))
+            fire_ticks(ts - 1)
+            tripwire.ingest(_to_comment(raw))
+    finally:
+        archiver.close()
 
 
 if __name__ == "__main__":
