@@ -8,3 +8,6 @@ fakeredis
 redis
 psutil
 pyarrow
+plotly
+google-cloud-storage
+pandas

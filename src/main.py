@@ -33,6 +33,7 @@ STREAM_CUTOFF_TS = 1701388800  # 2023-12-01 00:00:00 UTC
 
 _ROOT       = Path(__file__).resolve().parent.parent
 DB_PATH     = str(_ROOT / "data" / "dbs" / "anomalies.db")
+LIVE_DB     = str(_ROOT / "data" / "dbs" / "anomalies_hn_live.db")
 DATA_FILE   = str(_ROOT / "data" / "raw_dumps" / "RC_2023-11.zst")
 PARQUET_DIR = _ROOT / "data" / "parquet"
 
@@ -154,6 +155,37 @@ def run() -> None:
     conn.close()
 
 
+def _init_live_db(path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS anomalies (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel       TEXT    NOT NULL,
+            window_start  INTEGER NOT NULL,
+            window_end    INTEGER NOT NULL,
+            window_end_dt TEXT    NOT NULL,
+            count         INTEGER NOT NULL,
+            z_score       REAL    NOT NULL,
+            mean          REAL    NOT NULL,
+            std           REAL    NOT NULL
+        );
+    """)
+    conn.commit()
+    return conn
+
+
+def _save_live_anomaly(conn: sqlite3.Connection, ev: AnomalyEvent) -> None:
+    dt = datetime.fromtimestamp(ev.window_end, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    conn.execute(
+        "INSERT INTO anomalies "
+        "(channel, window_start, window_end, window_end_dt, count, z_score, mean, std) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (ev.subreddit, ev.window_start, ev.window_end, dt,
+         ev.count, ev.z_score, ev.mean, ev.std),
+    )
+    conn.commit()
+
+
 def _to_comment(raw: Dict) -> Comment:
     return Comment(
         id=raw.get("id", ""),
@@ -175,7 +207,7 @@ EVAL_INTERVAL     = SlidingWindowTripwire.EVAL_INTERVAL      # 300s
 BASELINE_INTERVAL = SlidingWindowTripwire.BASELINE_INTERVAL  # 3600s
 
 
-def live_hn(use_real_redis: bool = False) -> None:
+def live_hn(use_real_redis: bool = True) -> None:
     sys.stdout.reconfigure(encoding="utf-8")
 
     print("=" * 70)
@@ -184,7 +216,7 @@ def live_hn(use_real_redis: bool = False) -> None:
 
     if use_real_redis:
         import redis
-        r = redis.Redis(decode_responses=True)
+        r = redis.Redis(host='localhost', port=6379, decode_responses=True)
     else:
         r = fakeredis.FakeRedis(decode_responses=True)
 
@@ -198,7 +230,8 @@ def live_hn(use_real_redis: bool = False) -> None:
 
     ticks: dict = {"eval": None, "base": None}
 
-    archiver = ParquetArchiver(PARQUET_DIR)
+    archiver   = ParquetArchiver(PARQUET_DIR)
+    live_conn  = _init_live_db(LIVE_DB)
 
     def fire_ticks(up_to: int) -> None:
         while True:
@@ -213,6 +246,7 @@ def live_hn(use_real_redis: bool = False) -> None:
                                if ev.texts else []
                     flat_kw  = [kw for c in clusters for kw in c["keywords"]]
                     archiver.archive(ev, flat_kw)
+                    _save_live_anomaly(live_conn, ev)
                     dispatcher.dispatch(ev, flat_kw)
                     dt = datetime.fromtimestamp(ev.window_end, tz=timezone.utc).strftime("%b %d %H:%M UTC")
                     print(
@@ -241,6 +275,7 @@ def live_hn(use_real_redis: bool = False) -> None:
             tripwire.ingest(_to_comment(raw))
     finally:
         archiver.close()
+        live_conn.close()
 
 
 if __name__ == "__main__":
