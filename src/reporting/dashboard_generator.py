@@ -127,6 +127,19 @@ def run() -> None:
     r     = redis.Redis(host="localhost", port=6379, decode_responses=True)
     state = RedisStateManager(r)
     conn  = sqlite3.connect(LIVE_DB, check_same_thread=False)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS anomalies (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel       TEXT    NOT NULL,
+            window_start  INTEGER NOT NULL,
+            window_end    INTEGER NOT NULL,
+            window_end_dt TEXT    NOT NULL,
+            count         INTEGER NOT NULL,
+            z_score       REAL    NOT NULL,
+            mean          REAL    NOT NULL,
+            std           REAL    NOT NULL
+        );
+    """)
 
     print(f"Dashboard generator — refreshing every {REFRESH_SEC}s")
     print(f"Reading Redis @ localhost:6379 | SQLite @ {Path(LIVE_DB).name}")
