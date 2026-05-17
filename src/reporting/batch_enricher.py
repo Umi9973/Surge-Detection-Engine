@@ -21,6 +21,7 @@ from ..pipeline.context import DBSCANContextEngine
 
 _ROOT           = Path(__file__).resolve().parent.parent.parent
 _GCS_BUCKET     = "hn-surge-dashboard-01"
+_GCS_PROJECT    = "project-8299dfb6-57e5-4dcf-bc0"
 _GCS_PREFIX     = "parquet/"
 _LOCAL_ENRICHED = _ROOT / "data" / "parquet_enriched"
 _DONE_FILE      = _LOCAL_ENRICHED / ".processed"
@@ -42,7 +43,7 @@ def run() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     _LOCAL_ENRICHED.mkdir(parents=True, exist_ok=True)
 
-    client = storage.Client()
+    client = storage.Client(project=_GCS_PROJECT)
     bucket = client.bucket(_GCS_BUCKET)
     nlp    = DBSCANContextEngine()
     done   = _load_done()

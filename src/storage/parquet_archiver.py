@@ -9,8 +9,9 @@ import pyarrow.parquet as pq
 
 from ..models import AnomalyEvent
 
-_GCS_BUCKET = "hn-surge-dashboard-01"
-_GCS_PREFIX = "parquet"
+_GCS_BUCKET   = "hn-surge-dashboard-01"
+_GCS_PROJECT  = "project-8299dfb6-57e5-4dcf-bc0"
+_GCS_PREFIX   = "parquet"
 
 _SCHEMA = pa.schema([
     pa.field("channel",       pa.string()),
@@ -87,7 +88,7 @@ class ParquetArchiver:
         import sys
         try:
             from google.cloud import storage
-            client    = storage.Client()
+            client    = storage.Client(project=_GCS_PROJECT)
             blob_name = _GCS_PREFIX + "/" + "/".join(local_path.parts[-4:])
             blob      = client.bucket(_GCS_BUCKET).blob(blob_name)
             blob.upload_from_filename(str(local_path))
