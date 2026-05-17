@@ -14,7 +14,6 @@ from .ingestion.hacker_news import HackerNewsIngestor
 from .ingestion.reddit import ZstFileIngestor
 from .models import Comment
 from .pipeline.alert_gate import AlertGate
-from .pipeline.context import DBSCANContextEngine
 from .pipeline.filter import SubredditFilter
 from .pipeline.sliding_tripwire import SlidingWindowTripwire
 from .pipeline.tripwire import TumblingWindowTripwire
@@ -225,7 +224,6 @@ def live_hn(use_real_redis: bool = True) -> None:
     gate     = AlertGate()
     ingestor = HackerNewsIngestor(poll_interval=5.0)
     filter_  = SubredditFilter(TARGET_CHANNELS)
-    nlp        = DBSCANContextEngine()
     dispatcher = WebhookDispatcher()   # reads WEBHOOK_URL from env; no-op if unset
 
     ticks: dict = {"eval": None, "base": None}
@@ -242,9 +240,7 @@ def live_hn(use_real_redis: bool = True) -> None:
                 raw_events = tripwire.evaluation_tick(e)
                 events     = gate.process(raw_events)
                 for ev in events:
-                    clusters = nlp.summarize_anomaly(ev.texts, window_start=ev.window_start) \
-                               if ev.texts else []
-                    flat_kw  = [kw for c in clusters for kw in c["keywords"]]
+                    flat_kw = []
                     archiver.archive(ev, flat_kw)
                     _save_live_anomaly(live_conn, ev)
                     dispatcher.dispatch(ev, flat_kw)

@@ -9,6 +9,9 @@ import pyarrow.parquet as pq
 
 from ..models import AnomalyEvent
 
+_GCS_BUCKET = "hn-surge-dashboard-01"
+_GCS_PREFIX = "parquet"
+
 _SCHEMA = pa.schema([
     pa.field("channel",       pa.string()),
     pa.field("window_start",  pa.int64()),
@@ -38,8 +41,9 @@ class ParquetArchiver:
     """
 
     def __init__(self, out_dir: Union[str, Path]) -> None:
-        self._out_dir = Path(out_dir)
-        self._writer: Optional[pq.ParquetWriter] = None
+        self._out_dir    = Path(out_dir)
+        self._writer:     Optional[pq.ParquetWriter] = None
+        self._local_path: Optional[Path] = None
 
     def _ensure_writer(self, window_end: int) -> pq.ParquetWriter:
         """Lazy-open the writer on the first archive() call."""
@@ -48,6 +52,7 @@ class ParquetArchiver:
             date   = datetime.fromtimestamp(window_end, tz=timezone.utc)
             path   = self._out_dir / f"{date:%Y/%m/%d}/anomalies_{run_ts}.parquet"
             path.parent.mkdir(parents=True, exist_ok=True)
+            self._local_path = path
             self._writer = pq.ParquetWriter(str(path), _SCHEMA, compression="snappy")
         return self._writer
 
@@ -78,10 +83,25 @@ class ParquetArchiver:
         )
         writer.write_table(table)
 
+    def _upload_to_gcs(self, local_path: Path) -> None:
+        import sys
+        try:
+            from google.cloud import storage
+            client    = storage.Client()
+            blob_name = _GCS_PREFIX + "/" + "/".join(local_path.parts[-4:])
+            blob      = client.bucket(_GCS_BUCKET).blob(blob_name)
+            blob.upload_from_filename(str(local_path))
+            print(f"  [archiver] → gs://{_GCS_BUCKET}/{blob_name}")
+        except Exception as exc:
+            print(f"  [archiver] GCS upload failed: {exc}", file=sys.stderr)
+
     def close(self) -> None:
         if self._writer:
             self._writer.close()
             self._writer = None
+        if self._local_path:
+            self._upload_to_gcs(self._local_path)
+            self._local_path = None
 
     def __enter__(self) -> "ParquetArchiver":
         return self
