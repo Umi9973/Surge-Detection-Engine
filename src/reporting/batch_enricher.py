@@ -59,7 +59,13 @@ def run() -> None:
         local_tmp = _LOCAL_ENRICHED / "tmp_download.parquet"
         blob.download_to_filename(str(local_tmp))
 
-        table        = pq.read_table(str(local_tmp))
+        try:
+            table = pq.read_table(str(local_tmp))
+        except Exception as exc:
+            print(f"  [skip] {blob.name} — corrupt file: {exc}", file=sys.stderr)
+            local_tmp.unlink(missing_ok=True)
+            _mark_done(blob.name)
+            continue
         enriched_rows = []
 
         for i in range(table.num_rows):
