@@ -83,6 +83,7 @@ class ParquetArchiver:
             schema=_SCHEMA,
         )
         writer.write_table(table)
+        self._upload_to_gcs(self._local_path)
 
     def _upload_to_gcs(self, local_path: Path) -> None:
         import sys
@@ -100,8 +101,6 @@ class ParquetArchiver:
         if self._writer:
             self._writer.close()
             self._writer = None
-        if self._local_path:
-            self._upload_to_gcs(self._local_path)
             self._local_path = None
 
     def __enter__(self) -> "ParquetArchiver":
