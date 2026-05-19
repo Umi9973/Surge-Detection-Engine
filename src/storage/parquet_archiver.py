@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Union
@@ -28,51 +29,32 @@ _SCHEMA = pa.schema([
 
 
 class ParquetArchiver:
-    """Writes AnomalyEvents to date-partitioned, snappy-compressed Parquet files.
+    """Writes each AnomalyEvent as its own complete Parquet file.
 
     File layout:
-        {out_dir}/{YYYY}/{MM}/{DD}/anomalies_{run_ts}.parquet
+        {out_dir}/{YYYY}/{MM}/{DD}/{channel}_{window_end}.parquet
 
-    One file per archiver instance. The run timestamp in the filename
-    prevents overwrite when the process restarts on the same day.
-
-    Usage:
-        with ParquetArchiver(root / "data" / "parquet") as archiver:
-            archiver.archive(ev, flat_keywords)
+    One file per anomaly — written atomically with pq.write_table() so the
+    file is always a valid Parquet file before GCS upload.
     """
 
     def __init__(self, out_dir: Union[str, Path]) -> None:
-        self._out_dir    = Path(out_dir)
-        self._writer:     Optional[pq.ParquetWriter] = None
-        self._local_path: Optional[Path] = None
-
-    def _ensure_writer(self, window_end: int) -> pq.ParquetWriter:
-        """Lazy-open the writer on the first archive() call."""
-        if self._writer is None:
-            run_ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            date   = datetime.fromtimestamp(window_end, tz=timezone.utc)
-            path   = self._out_dir / f"{date:%Y/%m/%d}/anomalies_{run_ts}.parquet"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            self._local_path = path
-            self._writer = pq.ParquetWriter(str(path), _SCHEMA, compression="snappy")
-        return self._writer
+        self._out_dir = Path(out_dir)
 
     def archive(
         self,
         event: AnomalyEvent,
         keywords: Optional[List[str]] = None,
     ) -> None:
-        """Append one AnomalyEvent row to the Parquet file."""
-        writer = self._ensure_writer(event.window_end)
-        dt = datetime.fromtimestamp(event.window_end, tz=timezone.utc).strftime(
-            "%Y-%m-%d %H:%M UTC"
-        )
+        dt       = datetime.fromtimestamp(event.window_end, tz=timezone.utc)
+        date_str = dt.strftime("%Y-%m-%d %H:%M UTC")
+
         table = pa.table(
             {
                 "channel":       [event.subreddit],
                 "window_start":  [event.window_start],
                 "window_end":    [event.window_end],
-                "window_end_dt": [dt],
+                "window_end_dt": [date_str],
                 "count":         [event.count],
                 "z_score":       [event.z_score],
                 "mean":          [event.mean],
@@ -82,11 +64,15 @@ class ParquetArchiver:
             },
             schema=_SCHEMA,
         )
-        writer.write_table(table)
-        self._upload_to_gcs(self._local_path)
+
+        filename = f"{event.subreddit}_{event.window_end}.parquet"
+        path     = self._out_dir / f"{dt:%Y/%m/%d}" / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        pq.write_table(table, str(path), compression="snappy")
+        self._upload_to_gcs(path)
 
     def _upload_to_gcs(self, local_path: Path) -> None:
-        import sys
         try:
             from google.cloud import storage
             client    = storage.Client(project=_GCS_PROJECT)
@@ -98,10 +84,7 @@ class ParquetArchiver:
             print(f"  [archiver] GCS upload failed: {exc}", file=sys.stderr)
 
     def close(self) -> None:
-        if self._writer:
-            self._writer.close()
-            self._writer = None
-            self._local_path = None
+        pass
 
     def __enter__(self) -> "ParquetArchiver":
         return self
