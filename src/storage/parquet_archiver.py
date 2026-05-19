@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Union
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -13,6 +13,13 @@ from ..models import AnomalyEvent
 _GCS_BUCKET   = "hn-surge-dashboard-01"
 _GCS_PROJECT  = "project-8299dfb6-57e5-4dcf-bc0"
 _GCS_PREFIX   = "parquet"
+
+_CLUSTER_STRUCT = pa.struct([
+    pa.field("cluster_id",  pa.int64()),
+    pa.field("size",        pa.int64()),
+    pa.field("noise_count", pa.int64()),
+    pa.field("keywords",    pa.list_(pa.string())),
+])
 
 _SCHEMA = pa.schema([
     pa.field("channel",       pa.string()),
@@ -24,7 +31,7 @@ _SCHEMA = pa.schema([
     pa.field("mean",          pa.float64()),
     pa.field("std",           pa.float64()),
     pa.field("texts",         pa.list_(pa.string())),
-    pa.field("keywords",      pa.list_(pa.string())),
+    pa.field("clusters",      pa.list_(_CLUSTER_STRUCT)),
 ])
 
 
@@ -41,11 +48,7 @@ class ParquetArchiver:
     def __init__(self, out_dir: Union[str, Path]) -> None:
         self._out_dir = Path(out_dir)
 
-    def archive(
-        self,
-        event: AnomalyEvent,
-        keywords: Optional[List[str]] = None,
-    ) -> None:
+    def archive(self, event: AnomalyEvent) -> None:
         dt       = datetime.fromtimestamp(event.window_end, tz=timezone.utc)
         date_str = dt.strftime("%Y-%m-%d %H:%M UTC")
 
@@ -60,7 +63,7 @@ class ParquetArchiver:
                 "mean":          [event.mean],
                 "std":           [event.std],
                 "texts":         [event.texts or []],
-                "keywords":      [keywords or []],
+                "clusters":      pa.array([[]], type=pa.list_(_CLUSTER_STRUCT)),
             },
             schema=_SCHEMA,
         )

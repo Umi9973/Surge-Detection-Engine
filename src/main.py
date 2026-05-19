@@ -240,8 +240,7 @@ def live_hn(use_real_redis: bool = True) -> None:
                 raw_events = tripwire.evaluation_tick(e)
                 events     = gate.process(raw_events)
                 for ev in events:
-                    flat_kw = []
-                    archiver.archive(ev, flat_kw)
+                    archiver.archive(ev)
                     _save_live_anomaly(live_conn, ev)
                     dispatcher.dispatch(ev, flat_kw)
                     dt = datetime.fromtimestamp(ev.window_end, tz=timezone.utc).strftime("%b %d %H:%M UTC")

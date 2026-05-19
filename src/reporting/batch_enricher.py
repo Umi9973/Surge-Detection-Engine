@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 from google.cloud import storage
 
 from ..pipeline.context import DBSCANContextEngine
+from ..storage.parquet_archiver import _SCHEMA, _CLUSTER_STRUCT
 
 _ROOT           = Path(__file__).resolve().parent.parent.parent
 _GCS_BUCKET     = "hn-surge-dashboard-01"
@@ -25,6 +26,8 @@ _GCS_PROJECT    = "project-8299dfb6-57e5-4dcf-bc0"
 _GCS_PREFIX     = "parquet/"
 _LOCAL_ENRICHED = _ROOT / "data" / "parquet_enriched"
 _DONE_FILE      = _LOCAL_ENRICHED / ".processed"
+
+_OUTPUT_COLS = [f.name for f in _SCHEMA]
 
 
 def _load_done() -> set[str]:
@@ -37,6 +40,14 @@ def _mark_done(blob_name: str) -> None:
     _DONE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with _DONE_FILE.open("a") as f:
         f.write(blob_name + "\n")
+
+
+def _normalise_row(row: dict) -> dict:
+    """Map old-schema rows (keywords: list<str>) to new schema (clusters: list<struct>)."""
+    if "keywords" in row:
+        del row["keywords"]
+    row.setdefault("clusters", [])
+    return row
 
 
 def run() -> None:
@@ -66,22 +77,32 @@ def run() -> None:
             local_tmp.unlink(missing_ok=True)
             _mark_done(blob.name)
             continue
-        enriched_rows = []
 
+        enriched_rows = []
         for i in range(table.num_rows):
-            row      = {col: table.column(col)[i].as_py() for col in table.schema.names}
-            texts    = row.get("texts") or []
-            clusters = nlp.summarize_anomaly(texts, window_start=row["window_start"]) if texts else []
-            row["keywords"] = [kw for c in clusters for kw in c["keywords"]]
+            row   = {col: table.column(col)[i].as_py() for col in table.schema.names}
+            row   = _normalise_row(row)
+            texts = row.get("texts") or []
+
+            raw_clusters = nlp.summarize_anomaly(texts, window_start=row["window_start"]) if texts else []
+            row["clusters"] = [
+                {
+                    "cluster_id":  c["cluster_id"],
+                    "size":        c["size"],
+                    "noise_count": c["noise_count"],
+                    "keywords":    c["keywords"],
+                }
+                for c in raw_clusters
+            ]
             enriched_rows.append(row)
 
-        rel_parts = Path(blob.name).parts[1:]  # strip leading "parquet/" segment
+        rel_parts = Path(blob.name).parts[1:]
         out_path  = _LOCAL_ENRICHED.joinpath(*rel_parts)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         enriched_table = pa.table(
-            {col: [r[col] for r in enriched_rows] for col in table.schema.names},
-            schema=table.schema,
+            {col: [r[col] for r in enriched_rows] for col in _OUTPUT_COLS},
+            schema=_SCHEMA,
         )
         pq.write_table(enriched_table, str(out_path), compression="snappy")
         print(f"  Enriched {blob.name} → {out_path.name}")
