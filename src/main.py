@@ -242,7 +242,7 @@ def live_hn(use_real_redis: bool = True) -> None:
                 for ev in events:
                     archiver.archive(ev)
                     _save_live_anomaly(live_conn, ev)
-                    dispatcher.dispatch(ev, flat_kw)
+                    dispatcher.dispatch(ev, [])
                     dt = datetime.fromtimestamp(ev.window_end, tz=timezone.utc).strftime("%b %d %H:%M UTC")
                     print(
                         f"  *** ANOMALY  {ev.subreddit:<12} | {dt} | "
