@@ -229,6 +229,7 @@ def live_hn(use_real_redis: bool = True) -> None:
     ticks: dict = {"eval": None, "base": None}
 
     archiver   = ParquetArchiver(PARQUET_DIR)
+    archiver.retry_pending()
     live_conn  = _init_live_db(LIVE_DB)
 
     def fire_ticks(up_to: int) -> None:

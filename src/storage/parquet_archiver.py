@@ -41,8 +41,9 @@ class ParquetArchiver:
     File layout:
         {out_dir}/{YYYY}/{MM}/{DD}/{channel}_{window_end}.parquet
 
-    One file per anomaly — written atomically with pq.write_table() so the
-    file is always a valid Parquet file before GCS upload.
+    Write is atomic: data goes to a .parquet.tmp file first, then renamed
+    to .parquet on success. retry_pending() only scans *.parquet so a crash
+    during write never leaves a corrupt file eligible for upload.
     """
 
     def __init__(self, out_dir: Union[str, Path]) -> None:
@@ -70,21 +71,39 @@ class ParquetArchiver:
 
         filename = f"{event.subreddit}_{event.window_end}.parquet"
         path     = self._out_dir / f"{dt:%Y/%m/%d}" / filename
+        tmp_path = path.with_suffix(".parquet.tmp")
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        pq.write_table(table, str(path), compression="snappy")
+        pq.write_table(table, str(tmp_path), compression="snappy")
+        tmp_path.replace(path)
         self._upload_to_gcs(path)
 
     def _upload_to_gcs(self, local_path: Path) -> None:
+        rel_path  = local_path.relative_to(self._out_dir)
+        blob_name = f"{_GCS_PREFIX}/{rel_path.as_posix()}"
+
         try:
             from google.cloud import storage
-            client    = storage.Client(project=_GCS_PROJECT)
-            blob_name = _GCS_PREFIX + "/" + "/".join(local_path.parts[-4:])
-            blob      = client.bucket(_GCS_BUCKET).blob(blob_name)
+            client = storage.Client(project=_GCS_PROJECT)
+            blob   = client.bucket(_GCS_BUCKET).blob(blob_name)
             blob.upload_from_filename(str(local_path))
             print(f"  [archiver] → gs://{_GCS_BUCKET}/{blob_name}")
         except Exception as exc:
             print(f"  [archiver] GCS upload failed: {exc}", file=sys.stderr)
+            return
+
+        try:
+            local_path.unlink()
+        except Exception as exc:
+            print(f"  [archiver] uploaded but failed to delete {local_path}: {exc}", file=sys.stderr)
+
+    def retry_pending(self) -> None:
+        leftover = list(self._out_dir.rglob("*.parquet"))
+        if not leftover:
+            return
+        print(f"  [archiver] retrying {len(leftover)} pending upload(s)...")
+        for path in leftover:
+            self._upload_to_gcs(path)
 
     def close(self) -> None:
         pass
