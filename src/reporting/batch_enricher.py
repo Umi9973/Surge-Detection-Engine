@@ -11,6 +11,7 @@ on each row's texts, and writes enriched Parquet to data/parquet_enriched/.
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pyarrow as pa
@@ -18,7 +19,7 @@ import pyarrow.parquet as pq
 from google.cloud import storage
 
 from ..pipeline.context import DBSCANContextEngine
-from ..storage.parquet_archiver import _SCHEMA, _CLUSTER_STRUCT
+from ..storage.parquet_archiver import _SCHEMA, _CLUSTER_STRUCT, _ITEM_STRUCT
 
 _ROOT           = Path(__file__).resolve().parent.parent.parent
 _GCS_BUCKET     = "hn-surge-dashboard-01"
@@ -43,10 +44,11 @@ def _mark_done(blob_name: str) -> None:
 
 
 def _normalise_row(row: dict) -> dict:
-    """Map old-schema rows (keywords: list<str>) to new schema (clusters: list<struct>)."""
+    """Map old-schema rows to current schema, filling missing columns with defaults."""
     if "keywords" in row:
         del row["keywords"]
     row.setdefault("clusters", [])
+    row.setdefault("items",    [])
     return row
 
 
@@ -83,27 +85,53 @@ def run() -> None:
             row   = {col: table.column(col)[i].as_py() for col in table.schema.names}
             row   = _normalise_row(row)
             texts = row.get("texts") or []
+            items = row.get("items") or []
 
             raw_clusters = nlp.summarize_anomaly(texts, window_start=row["window_start"]) if texts else []
-            row["clusters"] = [
-                {
-                    "cluster_id":  c["cluster_id"],
-                    "size":        c["size"],
-                    "noise_count": c["noise_count"],
-                    "keywords":    c["keywords"],
-                }
-                for c in raw_clusters
-            ]
+
+            row["clusters"] = []
+            for c in raw_clusters:
+                indices = c.get("text_indices", [])
+                valid   = [idx for idx in indices if idx < len(items)]
+                known   = [idx for idx in valid if (items[idx] or {}).get("story_id", 0)]
+
+                if known:
+                    story_counts   = Counter((items[idx] or {}).get("story_id", 0) for idx in known)
+                    top_sid, top_n = story_counts.most_common(1)[0]
+                    top_pct        = top_n / len(known)
+                    top_title      = next(
+                        ((items[idx] or {}).get("story_title", "") for idx in known
+                         if (items[idx] or {}).get("story_id") == top_sid),
+                        "",
+                    )
+                else:
+                    top_sid, top_title, top_pct = 0, "", 0.0
+
+                row["clusters"].append({
+                    "cluster_id":      c["cluster_id"],
+                    "size":            c["size"],
+                    "noise_count":     c["noise_count"],
+                    "keywords":        c["keywords"],
+                    "top_story_id":    top_sid,
+                    "top_story_title": top_title,
+                    "top_story_pct":   round(top_pct, 3),
+                })
+
             enriched_rows.append(row)
 
         rel_parts = Path(blob.name).parts[1:]
         out_path  = _LOCAL_ENRICHED.joinpath(*rel_parts)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        enriched_table = pa.table(
-            {col: [r[col] for r in enriched_rows] for col in _OUTPUT_COLS},
-            schema=_SCHEMA,
-        )
+        cols = {}
+        for col in _OUTPUT_COLS:
+            if col == "items":
+                cols[col] = pa.array([r["items"] for r in enriched_rows], type=pa.list_(_ITEM_STRUCT))
+            elif col == "clusters":
+                cols[col] = pa.array([r["clusters"] for r in enriched_rows], type=pa.list_(_CLUSTER_STRUCT))
+            else:
+                cols[col] = [r[col] for r in enriched_rows]
+        enriched_table = pa.table(cols, schema=_SCHEMA)
         pq.write_table(enriched_table, str(out_path), compression="snappy")
         print(f"  Enriched {blob.name} → {out_path.name}")
 

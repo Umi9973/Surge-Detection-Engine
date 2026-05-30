@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import Dict, List
 
 
 @dataclass
 class Comment:
-    id:        str
-    subreddit: str
-    body:      str
-    timestamp: int
-    author:    str = ""
-    score:     int = 0
+    id:          str
+    subreddit:   str
+    body:        str
+    timestamp:   int
+    author:      str = ""
+    score:       int = 0
+    story_id:    int = 0
+    story_title: str = ""
+    domain:      str = ""
+    item_type:   str = ""
 
 
 @dataclass
@@ -21,6 +25,6 @@ class AnomalyEvent:
     window_end:   int
     count:        int
     z_score:      float
-    texts:        List[str] = field(default_factory=list)
+    items:        List[Dict] = field(default_factory=list)  # {text, story_id, story_title, domain, item_type}
     mean:         float = 0.0
     std:          float = 0.0

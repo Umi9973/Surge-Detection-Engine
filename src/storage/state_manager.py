@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import random
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Dict, List, Optional
 from uuid import uuid4
 
 import redis
@@ -30,8 +31,10 @@ class StateManager(ABC):
         """Return the number of comments in the 2-hour window ending at `now`."""
 
     @abstractmethod
-    def get_window_texts(self, subreddit: str, now: int) -> List[str]:
-        """Return a random sample of comment bodies from the current window."""
+    def get_window_items(self, subreddit: str, now: int) -> List[Dict]:
+        """Return a random sample of items from the current window.
+        Each dict: {text, story_id, story_title, domain, item_type}.
+        """
 
     @abstractmethod
     def get_history(self, subreddit: str) -> List[float]:
@@ -74,7 +77,7 @@ class RedisStateManager(StateManager):
 
     def ingest(self, comment: Comment) -> None:
         key    = f"window:{comment.subreddit}"
-        member = f"{uuid4().hex}:{comment.body[:120]}"
+        member = f"{uuid4().hex}:{json.dumps({'t': comment.body[:120], 'sid': comment.story_id, 'st': comment.story_title, 'd': comment.domain, 'it': comment.item_type})}"
         self.r.zadd(key, {member: comment.timestamp})
 
     # --- Window ---
@@ -88,13 +91,34 @@ class RedisStateManager(StateManager):
         self._prune(subreddit, now)
         return self.r.zcount(f"window:{subreddit}", now - self._window_ttl, now)
 
-    def get_window_texts(self, subreddit: str, now: int) -> List[str]:
+    def get_window_items(self, subreddit: str, now: int) -> List[Dict]:
         self._prune(subreddit, now)
         members = self.r.zrangebyscore(
             f"window:{subreddit}", now - self._window_ttl, now
         )
         sample = random.sample(members, min(len(members), self._text_cap))
-        return [m.split(":", 1)[1] for m in sample]
+        items = []
+        for m in sample:
+            try:
+                _, payload = m.split(":", 1)
+                d = json.loads(payload)
+                items.append({
+                    "text":        d.get("t", ""),
+                    "story_id":    d.get("sid", 0),
+                    "story_title": d.get("st", ""),
+                    "domain":      d.get("d", ""),
+                    "item_type":   d.get("it", ""),
+                })
+            except Exception:
+                # Old plain-text entry or any parse error — degrade gracefully
+                items.append({
+                    "text":        m.split(":", 1)[-1] if ":" in m else m,
+                    "story_id":    0,
+                    "story_title": "",
+                    "domain":      "",
+                    "item_type":   "",
+                })
+        return items
 
     # --- History ---
 

@@ -15,10 +15,21 @@ _GCS_PROJECT  = "project-8299dfb6-57e5-4dcf-bc0"
 _GCS_PREFIX   = "parquet"
 
 _CLUSTER_STRUCT = pa.struct([
-    pa.field("cluster_id",  pa.int64()),
-    pa.field("size",        pa.int64()),
-    pa.field("noise_count", pa.int64()),
-    pa.field("keywords",    pa.list_(pa.string())),
+    pa.field("cluster_id",      pa.int64()),
+    pa.field("size",            pa.int64()),
+    pa.field("noise_count",     pa.int64()),
+    pa.field("keywords",        pa.list_(pa.string())),
+    pa.field("top_story_id",    pa.int64()),
+    pa.field("top_story_title", pa.string()),
+    pa.field("top_story_pct",   pa.float64()),
+])
+
+_ITEM_STRUCT = pa.struct([
+    pa.field("text",        pa.string()),
+    pa.field("story_id",    pa.int64()),
+    pa.field("story_title", pa.string()),
+    pa.field("domain",      pa.string()),
+    pa.field("item_type",   pa.string()),
 ])
 
 _SCHEMA = pa.schema([
@@ -31,6 +42,7 @@ _SCHEMA = pa.schema([
     pa.field("mean",          pa.float64()),
     pa.field("std",           pa.float64()),
     pa.field("texts",         pa.list_(pa.string())),
+    pa.field("items",         pa.list_(_ITEM_STRUCT)),
     pa.field("clusters",      pa.list_(_CLUSTER_STRUCT)),
 ])
 
@@ -53,6 +65,8 @@ class ParquetArchiver:
         dt       = datetime.fromtimestamp(event.window_end, tz=timezone.utc)
         date_str = dt.strftime("%Y-%m-%d %H:%M UTC")
 
+        item_rows = event.items or []
+
         table = pa.table(
             {
                 "channel":       [event.subreddit],
@@ -63,7 +77,8 @@ class ParquetArchiver:
                 "z_score":       [event.z_score],
                 "mean":          [event.mean],
                 "std":           [event.std],
-                "texts":         [event.texts or []],
+                "texts":         [[i["text"] for i in item_rows]],
+                "items":         pa.array([item_rows], type=pa.list_(_ITEM_STRUCT)),
                 "clusters":      pa.array([[]], type=pa.list_(_CLUSTER_STRUCT)),
             },
             schema=_SCHEMA,

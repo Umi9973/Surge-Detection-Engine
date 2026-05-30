@@ -188,6 +188,8 @@ class _HNItemProcessor:
 
     def __init__(self) -> None:
         self._item_topics: Dict[int, str] = {}
+        self._item_story:  Dict[int, int] = {}   # item_id → root story_id
+        self._story_meta:  Dict[int, Dict] = {}  # story_id → {title, domain}
         self._router = HNTopicRouter()
 
     def _process(self, items: List[Optional[Dict]]) -> Iterator[Dict]:
@@ -203,8 +205,14 @@ class _HNItemProcessor:
 
             if item["type"] == "story":
                 title   = item.get("title", "")
-                channel = self._router.classify(title, url=item.get("url", ""))
+                url     = item.get("url", "")
+                channel = self._router.classify(title, url=url)
                 self._item_topics[item_id] = channel
+                self._item_story[item_id]  = item_id
+                self._story_meta[item_id]  = {
+                    "title":  title,
+                    "domain": _extract_domain(url),
+                }
 
             else:  # comment
                 parent_id = item.get("parent")
@@ -214,11 +222,23 @@ class _HNItemProcessor:
                 if channel is None:
                     continue
                 self._item_topics[item_id] = channel
+                # If parent was evicted from _item_story, use 0 — parent_id
+                # may be a comment ID, not a story ID, so it must not be used
+                # as a fallback story lookup key.
+                self._item_story[item_id] = self._item_story.get(parent_id, 0)
 
             if len(self._item_topics) > self._EVICT_AT:
                 keys_to_drop = list(self._item_topics.keys())[: self._EVICT_DROP]
                 for k in keys_to_drop:
                     del self._item_topics[k]
+                    self._item_story.pop(k, None)
+
+            # Only evict story metadata not referenced by any live item.
+            if len(self._story_meta) > 10_000:
+                referenced = set(self._item_story.values()) - {0}
+                to_drop = [sid for sid in list(self._story_meta)[:2_000] if sid not in referenced]
+                for k in to_drop:
+                    del self._story_meta[k]
 
             body = self._html_to_text(item.get("text") or item.get("title") or "")
             if not body:
@@ -232,15 +252,20 @@ class _HNItemProcessor:
         stripper.feed(raw)
         return html_mod.unescape(stripper.get_text())
 
-    @staticmethod
-    def _to_dict(item: Dict, channel: str, body: str) -> Dict:
+    def _to_dict(self, item: Dict, channel: str, body: str) -> Dict:
+        story_id = self._item_story.get(item["id"], 0)
+        meta     = self._story_meta.get(story_id, {})
         return {
-            "id":        str(item["id"]),
-            "subreddit": channel,
-            "body":      body,
-            "timestamp": item.get("time", 0),
-            "author":    item.get("by", ""),
-            "score":     item.get("score", 0),
+            "id":          str(item["id"]),
+            "subreddit":   channel,
+            "body":        body,
+            "timestamp":   item.get("time", 0),
+            "author":      item.get("by", ""),
+            "score":       item.get("score", 0),
+            "story_id":    story_id,
+            "story_title": meta.get("title", ""),
+            "domain":      meta.get("domain", ""),
+            "item_type":   item.get("type", ""),
         }
 
 

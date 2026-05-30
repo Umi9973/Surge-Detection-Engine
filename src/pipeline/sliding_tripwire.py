@@ -124,14 +124,14 @@ class SlidingWindowTripwire:
                 elevated = False
 
             if elevated:
-                texts = self.state.get_window_texts(sub, now)
+                items = self.state.get_window_items(sub, now)
                 events.append(AnomalyEvent(
                     subreddit=sub,
                     window_start=now - 7200,
                     window_end=now,
                     count=count,
                     z_score=round(z_score, 2),
-                    texts=texts,
+                    items=items,
                     mean=round(mean_val, 2),
                     std=round(std_val, 2),
                 ))

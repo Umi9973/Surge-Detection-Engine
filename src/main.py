@@ -187,12 +187,16 @@ def _save_live_anomaly(conn: sqlite3.Connection, ev: AnomalyEvent) -> None:
 
 def _to_comment(raw: Dict) -> Comment:
     return Comment(
-        id=raw.get("id", ""),
-        subreddit=raw.get("subreddit", ""),
-        body=raw.get("body", ""),
-        timestamp=int(raw.get("timestamp", 0)),
-        author=raw.get("author", ""),
-        score=int(raw.get("score", 0)),
+        id          = raw.get("id", ""),
+        subreddit   = raw.get("subreddit", ""),
+        body        = raw.get("body", ""),
+        timestamp   = int(raw.get("timestamp", 0)),
+        author      = raw.get("author", ""),
+        score       = int(raw.get("score", 0)),
+        story_id    = int(raw.get("story_id", 0)),
+        story_title = raw.get("story_title", ""),
+        domain      = raw.get("domain", ""),
+        item_type   = raw.get("item_type", ""),
     )
 
 

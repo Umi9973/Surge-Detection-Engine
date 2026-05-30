@@ -150,8 +150,11 @@ class DBSCANContextEngine(NLPContextEngine):
         labels = DBSCAN(eps=self._dbscan_eps, min_samples=self._dbscan_min_samples).fit_predict(reduced)
 
         clusters: Dict[int, List[str]] = {}
-        for label, text in zip(labels, texts):
+        cluster_indices: Dict[int, List[int]] = {}
+        for i, (label, text) in enumerate(zip(labels, texts)):
             clusters.setdefault(label, []).append(text)
+            if label != -1:
+                cluster_indices.setdefault(label, []).append(i)
 
         cluster_token_lists = {
             label: [token for t in txts for token in self._tokenize(t)]
@@ -174,10 +177,11 @@ class DBSCANContextEngine(NLPContextEngine):
         for i, label in enumerate(valid_labels):
             keywords = self._ctfidf_keywords(all_token_lists, i)
             results.append({
-                "cluster_id":  int(label),
-                "size":        len(clusters[label]),
-                "keywords":    keywords,
-                "noise_count": len(clusters.get(-1, [])),
+                "cluster_id":   int(label),
+                "size":         len(clusters[label]),
+                "keywords":     keywords,
+                "noise_count":  len(clusters.get(-1, [])),
+                "text_indices": cluster_indices.get(label, []),
             })
 
         return sorted(results, key=lambda x: -x["size"])

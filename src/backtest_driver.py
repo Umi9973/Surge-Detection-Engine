@@ -147,10 +147,10 @@ def _save_anomaly(conn: sqlite3.Connection, ev: AnomalyEvent) -> None:
         (ev.subreddit, ev.window_start, ev.window_end, dt, ev.count, ev.z_score, ev.mean, ev.std),
     )
     anomaly_id = cur.lastrowid
-    if ev.texts:
+    if ev.items:
         conn.executemany(
             "INSERT INTO anomaly_texts (anomaly_id, text) VALUES (?, ?)",
-            [(anomaly_id, t) for t in ev.texts],
+            [(anomaly_id, item["text"]) for item in ev.items],
         )
 
 
