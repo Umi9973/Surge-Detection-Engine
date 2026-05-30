@@ -45,6 +45,10 @@ class DBSCANContextEngine(NLPContextEngine):
         "any", "been", "being", "these", "other",
         # Contracted negatives — apostrophe stripped by regex leaves "didn", "don", "isn" etc.
         "didn", "don", "won", "isn", "wasn", "doesn", "wouldn", "couldn", "hadn", "shouldn",
+        # HN conversational filler — high frequency across all channels, zero topic signal
+        "people", "think", "work", "years", "year", "good", "make",
+        "time", "thing", "things", "way", "want", "need", "know",
+        "going", "sure", "lot", "though", "however", "well",
     }
 
     # When DBSCAN finds only one cluster, IDF is flat (every word scores 1.0),

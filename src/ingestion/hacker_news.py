@@ -46,14 +46,19 @@ TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
     ],
     "science": [
         ("arxiv", 3), ("crispr", 3), ("genomics", 3),
+        ("nasa", 3), ("blue origin", 3), ("new glenn", 3), ("starship", 3),
+        ("rocket", 2), ("orbital", 2), ("aerospace", 2), ("booster", 2),
+        ("spacex", 1),
         ("physics", 2), ("biology", 2), ("chemistry", 2), ("climate", 2), ("journal", 2),
         ("discovery", 1), ("research", 1), ("study", 1), ("paper", 1),
+        ("space", 1), ("launch", 1),
     ],
     "tech": [
         ("nvidia", 3), ("amd", 3), ("apple", 3), ("google", 3), ("microsoft", 3),
         ("amazon", 3), ("meta", 3),
+        ("home assistant", 2), ("sqlite", 2), ("postgres", 2), ("oauth", 2),
         ("gpu", 2), ("chip", 2), ("hardware", 2),
-        ("software", 1),
+        ("database", 1), ("software", 1),
     ],
     "policy": [
         ("gdpr", 3), ("antitrust", 3), ("sec", 3), ("congress", 3), ("senate", 3),
@@ -77,6 +82,9 @@ DOMAIN_BOOSTS: Dict[str, Tuple[str, float]] = {
     "coindesk.com":        ("crypto",   3),
     "nature.com":          ("science",  3),
     "science.org":         ("science",  3),
+    "nasa.gov":            ("science",  3),
+    "space.com":           ("science",  2),
+    "spacenews.com":       ("science",  2),
 }
 
 # Channel priority order for tie-breaking. "general" is last — it's the catch-all,

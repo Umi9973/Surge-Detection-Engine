@@ -248,10 +248,11 @@ def live_hn(use_real_redis: bool = True) -> None:
                     archiver.archive(ev)
                     _save_live_anomaly(live_conn, ev)
                     dispatcher.dispatch(ev, [])
-                    dt = datetime.fromtimestamp(ev.window_end, tz=timezone.utc).strftime("%b %d %H:%M UTC")
+                    dt    = datetime.fromtimestamp(ev.window_end, tz=timezone.utc).strftime("%b %d %H:%M UTC")
+                    z_str = f"10.0+ raw={ev.z_score:.2f}" if ev.z_score > 10.0 else f"{ev.z_score:.2f}"
                     print(
                         f"  *** ANOMALY  {ev.subreddit:<12} | {dt} | "
-                        f"count={ev.count:>5} | z={ev.z_score} ***"
+                        f"count={ev.count:>5} | z={z_str} ***"
                     )
                 ticks["eval"] = e + EVAL_INTERVAL
             else:

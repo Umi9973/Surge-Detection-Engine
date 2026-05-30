@@ -29,6 +29,7 @@ _LOCAL_ENRICHED = _ROOT / "data" / "parquet_enriched"
 _DONE_FILE      = _LOCAL_ENRICHED / ".processed"
 
 _OUTPUT_COLS = [f.name for f in _SCHEMA]
+_MIN_TEXTS_FOR_CLUSTERING = 50
 
 
 def _load_done() -> set[str]:
@@ -87,7 +88,11 @@ def run() -> None:
             texts = row.get("texts") or []
             items = row.get("items") or []
 
-            raw_clusters = nlp.summarize_anomaly(texts, window_start=row["window_start"]) if texts else []
+            raw_clusters = (
+                nlp.summarize_anomaly(texts, window_start=row["window_start"])
+                if len(texts) >= _MIN_TEXTS_FOR_CLUSTERING
+                else []
+            )
 
             row["clusters"] = []
             for c in raw_clusters:
