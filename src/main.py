@@ -197,6 +197,8 @@ def _to_comment(raw: Dict) -> Comment:
         story_title = raw.get("story_title", ""),
         domain      = raw.get("domain", ""),
         item_type   = raw.get("item_type", ""),
+        item_id     = int(raw.get("item_id", 0)),
+        created_at  = int(raw.get("created_at", 0)),
     )
 
 

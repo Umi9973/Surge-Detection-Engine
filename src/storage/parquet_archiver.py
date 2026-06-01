@@ -15,21 +15,26 @@ _GCS_PROJECT  = "project-8299dfb6-57e5-4dcf-bc0"
 _GCS_PREFIX   = "parquet"
 
 _CLUSTER_STRUCT = pa.struct([
-    pa.field("cluster_id",      pa.int64()),
-    pa.field("size",            pa.int64()),
-    pa.field("noise_count",     pa.int64()),
-    pa.field("keywords",        pa.list_(pa.string())),
-    pa.field("top_story_id",    pa.int64()),
-    pa.field("top_story_title", pa.string()),
-    pa.field("top_story_pct",   pa.float64()),
+    pa.field("cluster_id",         pa.int64()),
+    pa.field("size",               pa.int64()),
+    pa.field("noise_count",        pa.int64()),
+    pa.field("keywords",           pa.list_(pa.string())),
+    pa.field("top_story_id",       pa.int64()),
+    pa.field("top_story_title",    pa.string()),
+    pa.field("top_story_pct",      pa.float64()),
+    pa.field("unique_story_count", pa.int64()),
+    pa.field("story_ids",          pa.list_(pa.int64())),
+    pa.field("top_domains",        pa.list_(pa.string())),
 ])
 
 _ITEM_STRUCT = pa.struct([
-    pa.field("text",        pa.string()),
-    pa.field("story_id",    pa.int64()),
+    pa.field("item_id",    pa.int64()),
+    pa.field("text",       pa.string()),
+    pa.field("story_id",   pa.int64()),
     pa.field("story_title", pa.string()),
-    pa.field("domain",      pa.string()),
-    pa.field("item_type",   pa.string()),
+    pa.field("domain",     pa.string()),
+    pa.field("item_type",  pa.string()),
+    pa.field("created_at", pa.int64()),
 ])
 
 _SCHEMA = pa.schema([

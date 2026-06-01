@@ -50,6 +50,16 @@ def _normalise_row(row: dict) -> dict:
         del row["keywords"]
     row.setdefault("clusters", [])
     row.setdefault("items",    [])
+    # Back-fill new item fields for old files that predate the schema extension
+    normalised_items = []
+    for item in (row["items"] or []):
+        if item is None:
+            normalised_items.append(None)
+            continue
+        item.setdefault("item_id",    0)
+        item.setdefault("created_at", 0)
+        normalised_items.append(item)
+    row["items"] = normalised_items
     return row
 
 
@@ -109,17 +119,25 @@ def run() -> None:
                          if (items[idx] or {}).get("story_id") == top_sid),
                         "",
                     )
+                    unique_story_ids  = sorted({(items[idx] or {}).get("story_id", 0) for idx in known} - {0})
+                    domain_counts     = Counter((items[idx] or {}).get("domain", "") for idx in valid if (items[idx] or {}).get("domain", ""))
+                    top_domains       = [d for d, _ in domain_counts.most_common(5)]
                 else:
                     top_sid, top_title, top_pct = 0, "", 0.0
+                    unique_story_ids = []
+                    top_domains      = []
 
                 row["clusters"].append({
-                    "cluster_id":      c["cluster_id"],
-                    "size":            c["size"],
-                    "noise_count":     c["noise_count"],
-                    "keywords":        c["keywords"],
-                    "top_story_id":    top_sid,
-                    "top_story_title": top_title,
-                    "top_story_pct":   round(top_pct, 3),
+                    "cluster_id":         c["cluster_id"],
+                    "size":               c["size"],
+                    "noise_count":        c["noise_count"],
+                    "keywords":           c["keywords"],
+                    "top_story_id":       top_sid,
+                    "top_story_title":    top_title,
+                    "top_story_pct":      round(top_pct, 3),
+                    "unique_story_count": len(unique_story_ids),
+                    "story_ids":          unique_story_ids,
+                    "top_domains":        top_domains,
                 })
 
             enriched_rows.append(row)

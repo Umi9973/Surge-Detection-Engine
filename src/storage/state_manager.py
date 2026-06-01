@@ -33,7 +33,7 @@ class StateManager(ABC):
     @abstractmethod
     def get_window_items(self, subreddit: str, now: int) -> List[Dict]:
         """Return a random sample of items from the current window.
-        Each dict: {text, story_id, story_title, domain, item_type}.
+        Each dict: {item_id, text, story_id, story_title, domain, item_type, created_at}.
         """
 
     @abstractmethod
@@ -77,7 +77,7 @@ class RedisStateManager(StateManager):
 
     def ingest(self, comment: Comment) -> None:
         key    = f"window:{comment.subreddit}"
-        member = f"{uuid4().hex}:{json.dumps({'t': comment.body[:120], 'sid': comment.story_id, 'st': comment.story_title, 'd': comment.domain, 'it': comment.item_type})}"
+        member = f"{uuid4().hex}:{json.dumps({'t': comment.body[:120], 'sid': comment.story_id, 'st': comment.story_title, 'd': comment.domain, 'it': comment.item_type, 'iid': comment.item_id, 'ca': comment.created_at})}"
         self.r.zadd(key, {member: comment.timestamp})
 
     # --- Window ---
@@ -103,20 +103,24 @@ class RedisStateManager(StateManager):
                 _, payload = m.split(":", 1)
                 d = json.loads(payload)
                 items.append({
+                    "item_id":     d.get("iid", 0),
                     "text":        d.get("t", ""),
                     "story_id":    d.get("sid", 0),
                     "story_title": d.get("st", ""),
                     "domain":      d.get("d", ""),
                     "item_type":   d.get("it", ""),
+                    "created_at":  d.get("ca", 0),
                 })
             except Exception:
                 # Old plain-text entry or any parse error — degrade gracefully
                 items.append({
+                    "item_id":     0,
                     "text":        m.split(":", 1)[-1] if ":" in m else m,
                     "story_id":    0,
                     "story_title": "",
                     "domain":      "",
                     "item_type":   "",
+                    "created_at":  0,
                 })
         return items
 

@@ -274,6 +274,8 @@ class _HNItemProcessor:
             "story_title": meta.get("title", ""),
             "domain":      meta.get("domain", ""),
             "item_type":   item.get("type", ""),
+            "item_id":     item.get("id", 0),
+            "created_at":  item.get("time", 0),
         }
 
 

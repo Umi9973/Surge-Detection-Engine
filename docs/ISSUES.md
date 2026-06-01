@@ -249,6 +249,23 @@ This document tracks significant architectural challenges, bugs, and bottlenecks
 
 ---
 
+### [OPEN] Issue #18: Flash/sustained event classification not wired into live HN pipeline
+
+* **Date Opened:** 2026-05-31
+* **Phase:** Phase 2 — Live HN Pipeline / Event Aggregation
+* **The Problem:** The live `live_hn()` pipeline emits raw `AnomalyEvent` objects with no classification of their shape. A 13-hour startup surge (z=52, 25 consecutive windows) and a single-window science blip (z=3.9) are treated identically — both produce one `*** ANOMALY ***` line and one Parquet file, with no label distinguishing them. An operator watching the console cannot tell whether a channel is in a brief spike or a developing multi-hour story without manually counting consecutive windows.
+* **Root Cause:** The classification logic already exists in `src/analysis/aggregator.py` — it implements three event types (FLASH, SUSTAINED, ISOLATED) with full Union-Find cross-channel merging, Multi-Track Anchor keyword locking, and Szymkiewicz–Simpson overlap scoring. However, it was built as a **post-hoc batch processor** for the Reddit historical backtest: it reads from a completed SQLite `anomalies` table and writes to `consolidated_events`. It has no streaming interface and is never called from `live_hn()`.
+* **What the aggregator does (for reference when porting):**
+  1. **FLASH** — links anomalies across ≥2 channels within a 2-hour sliding window if any cluster pair shares ≥30% keyword overlap (Szymkiewicz–Simpson) and ≥2 shared keywords. Uses Union-Find; splits transitivity chains longer than 4 hours.
+  2. **SUSTAINED** — single-channel run of ≥4 consecutive hourly windows at ≥50% keyword overlap. Multi-Track Anchor locks to the dominant DBSCAN cluster at Hour 2, preventing topic bleed from unrelated concurrent stories. The dominant track expands (`|=`) to allow within-story vocabulary evolution.
+  3. **ISOLATED** — any anomaly not claimed by FLASH or SUSTAINED.
+  4. **Claim order: FLASH → SUSTAINED → ISOLATED** — prevents double-counting. A cross-channel event wins over a single-channel sustained chain.
+* **Impact:** The live output is noisy and unactionable during long surges. A 13-hour startup surge generates 25 separate `*** ANOMALY ***` lines in logs and 25 Parquet files instead of one `[startup SUSTAINED — 13h, peak z=52.17, story: Danish pension fund...]` event. Discord webhooks (if enabled) would spam 25 notifications for one real event. The enriched Parquet files lack any event-level grouping that would allow a dashboard to display "this surge lasted 13 hours and was driven by these 3 stories."
+* **Proposed Fix:** Port the aggregator into a streaming `EventConsolidator` component that buffers raw `AnomalyEvent` objects and emits labelled consolidated events with a short look-ahead delay (e.g., 2 evaluation ticks = 10 minutes). Add `event_type: str` and `event_duration_s: int` fields to the consolidated event. Wire it between `AlertGate` and `archiver/dispatcher` in `live_hn()`. The existing aggregator logic can be adapted with minimal changes — the core algorithms (Union-Find, Multi-Track Anchor, claim order) transfer directly.
+* **Key Takeaway:** Batch aggregation logic and streaming aggregation logic share the same math but require different state management. The batch version can look at the full event timeline; the streaming version must emit with bounded latency using a sliding buffer. Porting requires deciding the look-ahead budget — longer look-ahead gives better classification accuracy at the cost of notification delay.
+
+---
+
 ### [CLOSED] Issue #7: AGGREGATOR_STOPWORDS applied before stemming — inflected forms bypass filter
 
 * **Date Opened:** 2026-05-06

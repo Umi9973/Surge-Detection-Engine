@@ -16,6 +16,8 @@ class Comment:
     story_title: str = ""
     domain:      str = ""
     item_type:   str = ""
+    item_id:     int = 0
+    created_at:  int = 0
 
 
 @dataclass
@@ -25,6 +27,6 @@ class AnomalyEvent:
     window_end:   int
     count:        int
     z_score:      float
-    items:        List[Dict] = field(default_factory=list)  # {text, story_id, story_title, domain, item_type}
+    items:        List[Dict] = field(default_factory=list)  # {item_id, text, story_id, story_title, domain, item_type, created_at}
     mean:         float = 0.0
     std:          float = 0.0
