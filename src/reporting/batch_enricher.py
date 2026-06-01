@@ -13,20 +13,25 @@ from __future__ import annotations
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Dict, List
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 from google.cloud import storage
 
+from ..events.candidate_builder import CandidateBuilder
+from ..events.models import EventCandidate
 from ..pipeline.context import DBSCANContextEngine
+from ..storage.candidate_archiver import CandidateArchiver
 from ..storage.parquet_archiver import _SCHEMA, _CLUSTER_STRUCT, _ITEM_STRUCT
 
-_ROOT           = Path(__file__).resolve().parent.parent.parent
-_GCS_BUCKET     = "hn-surge-dashboard-01"
-_GCS_PROJECT    = "project-8299dfb6-57e5-4dcf-bc0"
-_GCS_PREFIX     = "parquet/"
-_LOCAL_ENRICHED = _ROOT / "data" / "parquet_enriched"
-_DONE_FILE      = _LOCAL_ENRICHED / ".processed"
+_ROOT             = Path(__file__).resolve().parent.parent.parent
+_GCS_BUCKET       = "hn-surge-dashboard-01"
+_GCS_PROJECT      = "project-8299dfb6-57e5-4dcf-bc0"
+_GCS_PREFIX       = "parquet/"
+_LOCAL_ENRICHED   = _ROOT / "data" / "parquet_enriched"
+_LOCAL_CANDIDATES = _ROOT / "data" / "event_candidates"
+_DONE_FILE        = _LOCAL_ENRICHED / ".processed"
 
 _OUTPUT_COLS = [f.name for f in _SCHEMA]
 _MIN_TEXTS_FOR_CLUSTERING = 50
@@ -67,10 +72,12 @@ def run() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     _LOCAL_ENRICHED.mkdir(parents=True, exist_ok=True)
 
-    client = storage.Client(project=_GCS_PROJECT)
-    bucket = client.bucket(_GCS_BUCKET)
-    nlp    = DBSCANContextEngine()
-    done   = _load_done()
+    client     = storage.Client(project=_GCS_PROJECT)
+    bucket     = client.bucket(_GCS_BUCKET)
+    nlp        = DBSCANContextEngine()
+    builder    = CandidateBuilder(source="hacker_news")
+    c_archiver = CandidateArchiver(_LOCAL_CANDIDATES)
+    done       = _load_done()
 
     blobs = [
         b for b in bucket.list_blobs(prefix=_GCS_PREFIX)
@@ -91,7 +98,9 @@ def run() -> None:
             _mark_done(blob.name)
             continue
 
-        enriched_rows = []
+        enriched_rows:   list = []
+        blob_candidates: List[EventCandidate] = []
+
         for i in range(table.num_rows):
             row   = {col: table.column(col)[i].as_py() for col in table.schema.names}
             row   = _normalise_row(row)
@@ -141,6 +150,15 @@ def run() -> None:
                 })
 
             enriched_rows.append(row)
+            blob_candidates.extend(builder.from_enriched_row(row))
+
+        groups: Dict[tuple, List[EventCandidate]] = {}
+        for cand in blob_candidates:
+            groups.setdefault((cand.channel, cand.window_end), []).append(cand)
+        for (ch, we), group in groups.items():
+            c_archiver.write(group, we)
+            kind_summary = Counter(cand.kind for cand in group)
+            print(f"    → {len(group)} candidate(s) [{ch}]: {dict(kind_summary)}")
 
         rel_parts = Path(blob.name).parts[1:]
         out_path  = _LOCAL_ENRICHED.joinpath(*rel_parts)
