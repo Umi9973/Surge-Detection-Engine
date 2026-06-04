@@ -103,7 +103,7 @@ def run() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
 
     print("=" * 70)
-    print("  Reddit Surge Detection — Full November 2023 Backtest")
+    print("  Surge Detection Engine — Full November 2023 Backtest")
     print("=" * 70)
 
     if os.path.exists(DB_PATH):
@@ -216,7 +216,7 @@ def live_hn(use_real_redis: bool = True) -> None:
     sys.stdout.reconfigure(encoding="utf-8")
 
     print("=" * 70)
-    print("  Reddit Surge Detection — Hacker News Live Feed")
+    print("  Surge Detection Engine — Hacker News Live Feed")
     print("=" * 70)
 
     if use_real_redis:

@@ -53,7 +53,7 @@ class WebhookDispatcher:
                 data=json.dumps(payload).encode(),
                 headers={
                     "Content-Type": "application/json",
-                    "User-Agent": "DiscordBot (RedditSurgeDetection, 1.0)",
+                    "User-Agent": "DiscordBot (SurgeDetectionEngine, 1.0)",
                 },
                 method="POST",
             )
@@ -98,7 +98,7 @@ class WebhookDispatcher:
                     {"name": "Z-Score",  "value": f"{event.z_score:.2f}",    "inline": True},
                     {"name": "Keywords", "value": kw_str,                     "inline": False},
                 ],
-                "footer": {"text": "Reddit Surge Detection Engine"},
+                "footer": {"text": "Surge Detection Engine"},
             }]
         }
 
@@ -115,6 +115,6 @@ class WebhookDispatcher:
                     {"title": "Z-Score",  "value": f"{event.z_score:.2f}", "short": True},
                     {"title": "Keywords", "value": kw_str,                  "short": False},
                 ],
-                "footer": "Reddit Surge Detection Engine",
+                "footer": "Surge Detection Engine",
             }]
         }

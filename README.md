@@ -228,7 +228,7 @@ docker run --name hn-redis -p 6379:6379 -d \
   redis:alpine redis-server --save 60 1
 
 # Repo
-git clone https://github.com/Umi9973/Reddit-Surge-Detection.git
+git clone https://github.com/Umi9973/Surge-Detection-Engine.git
 cd Reddit-Surge-Detection
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
