@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 import time
@@ -15,8 +16,8 @@ from ..storage.state_manager import RedisStateManager
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 
-BUCKET_NAME     = "hn-surge-dashboard-01"
-GCP_PROJECT     = "project-8299dfb6-57e5-4dcf-bc0"
+BUCKET_NAME     = os.environ.get("GCS_BUCKET",  "hn-surge-dashboard-01")
+GCP_PROJECT     = os.environ.get("GCS_PROJECT", "project-8299dfb6-57e5-4dcf-bc0")
 REFRESH_SEC     = 300
 LIVE_DB         = str(_ROOT / "data" / "dbs" / "anomalies_hn_live.db")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,8 +11,8 @@ import pyarrow.parquet as pq
 
 from ..models import AnomalyEvent
 
-_GCS_BUCKET   = "hn-surge-dashboard-01"
-_GCS_PROJECT  = "project-8299dfb6-57e5-4dcf-bc0"
+_GCS_BUCKET   = os.environ.get("GCS_BUCKET",   "hn-surge-dashboard-01")
+_GCS_PROJECT  = os.environ.get("GCS_PROJECT",  "project-8299dfb6-57e5-4dcf-bc0")
 _GCS_PREFIX   = "parquet"
 
 _CLUSTER_STRUCT = pa.struct([

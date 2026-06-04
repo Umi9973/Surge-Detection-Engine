@@ -233,7 +233,19 @@ cd Reddit-Surge-Detection
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 gcloud auth application-default login
-export WEBHOOK_URL="https://discord.com/api/webhooks/..."
+```
+
+**Environment variables** (copy `.env.example` → `.env`, then `source .env`):
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `WEBHOOK_URL` | No | — | Discord/Slack webhook. Unset = silent mode |
+| `GCS_BUCKET` | No | `hn-surge-dashboard-01` | GCS bucket name |
+| `GCS_PROJECT` | No | `project-8299dfb6-57e5-4dcf-bc0` | GCP project ID |
+
+```bash
+cp .env.example .env   # fill in your values
+source .env
 ```
 
 ```bash

@@ -10,6 +10,7 @@ on each row's texts, and writes enriched Parquet to data/parquet_enriched/.
 """
 from __future__ import annotations
 
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -26,8 +27,8 @@ from ..storage.candidate_archiver import CandidateArchiver
 from ..storage.parquet_archiver import _SCHEMA, _CLUSTER_STRUCT, _ITEM_STRUCT
 
 _ROOT             = Path(__file__).resolve().parent.parent.parent
-_GCS_BUCKET       = "hn-surge-dashboard-01"
-_GCS_PROJECT      = "project-8299dfb6-57e5-4dcf-bc0"
+_GCS_BUCKET       = os.environ.get("GCS_BUCKET",  "hn-surge-dashboard-01")
+_GCS_PROJECT      = os.environ.get("GCS_PROJECT", "project-8299dfb6-57e5-4dcf-bc0")
 _GCS_PREFIX       = "parquet/"
 _LOCAL_ENRICHED   = _ROOT / "data" / "parquet_enriched"
 _LOCAL_CANDIDATES = _ROOT / "data" / "event_candidates"
