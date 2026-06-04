@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Tuple
+from typing import List, Tuple
 
 
 def classify(
@@ -15,19 +15,22 @@ def classify(
     kind values: "unknown" | "viral_post" | "topic_surge" | "event_candidate"
     event_score: additive 0.0–1.0, computed for all non-unknown kinds.
     """
-    unique = cluster.get("unique_story_count", 0)
-    top_pct = cluster.get("top_story_pct", 0.0)
-    size = cluster.get("size", 0)
+    unique     = cluster.get("unique_story_count", 0)
+    top_pct    = cluster.get("top_story_pct", 0.0)
+    size       = cluster.get("size", 0)
     top_domains = cluster.get("top_domains") or []
+    keywords   = cluster.get("keywords") or []
 
-    # Guard: no attributed items — cannot classify meaningfully
     if unique == 0:
         return ("unknown", 0.0)
 
-    score = _score(unique, top_pct, top_domains, size, z_score)
+    score = _score(unique, top_pct, top_domains, size, z_score, keywords)
 
     if top_pct >= 0.80 or unique <= 1:
         kind = "viral_post"
+    elif len(keywords) < 2:
+        # Not enough coherent signal to call this an event regardless of unique count
+        kind = "topic_surge"
     elif unique >= 3 and len(top_domains) >= 2 and size >= 10:
         kind = "event_candidate"
     else:
@@ -42,11 +45,14 @@ def _score(
     top_domains: list,
     size: int,
     z_score: float,
+    keywords: List[str],
 ) -> float:
+    keyword_quality = min(len(keywords) / 5, 1.0)
     return (
-        0.30 * min(unique / 5,          1.0) +
-        0.20 * (1.0 - top_pct)              +
+        0.25 * min(unique / 5,           1.0) +
+        0.20 * (1.0 - top_pct)               +
         0.20 * min(len(top_domains) / 3, 1.0) +
-        0.15 * min(size / 100,          1.0) +
-        0.15 * min(z_score / 10.0,      1.0)
+        0.15 * min(size / 100,           1.0) +
+        0.10 * min(z_score / 10.0,       1.0) +
+        0.10 * keyword_quality
     )

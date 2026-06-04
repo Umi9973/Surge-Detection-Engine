@@ -49,6 +49,14 @@ class DBSCANContextEngine(NLPContextEngine):
         "people", "think", "work", "years", "year", "good", "make",
         "time", "thing", "things", "way", "want", "need", "know",
         "going", "sure", "lot", "though", "however", "well",
+        # Generic filler verbs and qualifiers that leak into HN keywords
+        "really", "actually", "also", "some", "many", "much", "bit",
+        "find", "through", "because", "something", "same", "point",
+        "run", "article", "writing", "write", "read", "video",
+        # URL fragments and domain tokens
+        "https", "http", "www", "com", "org", "net", "html", "utm", "amp",
+        # Artifact keywords — recurring ghost tokens with no topic signal
+        "delayed", "deleted", "highest", "setting",
     }
 
     # When DBSCAN finds only one cluster, IDF is flat (every word scores 1.0),
@@ -67,6 +75,9 @@ class DBSCANContextEngine(NLPContextEngine):
         # Reddit modbot / sidebar artifacts
         "removed", "submission", "compose", "moderator", "subreddit",
         "thread", "edit", "update", "deleted", "see", "also", "much",
+        # Artifact keywords carried over from base stopwords extension
+        "delayed", "highest", "setting", "https", "http", "www",
+        "com", "org", "net", "html", "utm", "amp",
     }
 
     def __init__(
