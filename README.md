@@ -1,9 +1,8 @@
-# HN Surge Detection
+# Surge Detection
 
-A real-time anomaly detection pipeline for Hacker News. Monitors 8 topic
+A real-time anomaly detection pipeline for internet surge, currenly focusing on Hacker News. Monitors 8 topic
 channels (ai, tech, security, startup, crypto, science, policy, general),
-detects statistical volume surges using a Z-score Schmitt trigger, fires
-Discord alerts, uploads interactive Plotly dashboards to Google Cloud Storage,
+detects statistical volume surges using a Z-score Schmitt trigger, uploads interactive Plotly dashboards to Google Cloud Storage,
 and runs NLP cluster analysis locally on enriched Parquet archives.
 
 ---
