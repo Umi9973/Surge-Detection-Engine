@@ -1,35 +1,54 @@
-# HN Surge Detection
+# Surge Detection Engine
 
-A real-time anomaly detection pipeline for Hacker News. Monitors 8 topic
-channels (ai, tech, security, startup, crypto, science, policy, general),
-detects statistical volume surges using a Z-score Schmitt trigger, fires
-Discord alerts, uploads interactive Plotly dashboards to Google Cloud Storage,
-and runs NLP cluster analysis locally on enriched Parquet archives.
+> Real-time event detection across social discussion platforms — built to spot when the internet starts talking about something before it becomes mainstream news.
+
+Monitors topic channels on social platforms, detects statistical volume surges using a Z-score Schmitt trigger, and classifies NLP clusters into typed event candidates: `viral_post`, `topic_surge`, or `event_candidate`.
+
+**Current platform:** Hacker News (via Firebase REST API). Reddit and Twitter ingestion are planned — the pipeline is designed for multi-source ingestion from the ground up.
 
 ---
 
-## Architecture Overview
-
-The system is split into two machines to avoid OOM on the VM:
+## How It Works
 
 ```
-VM (e2-micro, 1 GB RAM)                  Laptop
-─────────────────────────────            ──────────────────────────────
-HackerNewsIngestor (Firebase API)  →     batch_enricher.py
-  ↓                                        ↓ downloads from GCS
-SubredditFilter (channel router)           ↓ runs SentenceTransformer
-  ↓                                        ↓   + UMAP + DBSCAN
-SlidingWindowTripwire (Z-score)            ↓ writes enriched Parquet
-  ↓ anomaly fires                            locally
-ParquetArchiver → GCS (raw Parquet)
-  ↓
-SQLite (anomalies_hn_live.db)
-  ↓
-WebhookDispatcher → Discord
+Platform API (HN Firebase)
+  │
+  ▼
+HNTopicRouter          — classifies each story into 1 of 8 topic channels
+  │
+  ▼
+RedisStateManager      — maintains a 2-hour sliding window per channel (ZSET)
+  │
+  ▼
+SlidingWindowTripwire  — Z-score + Schmitt trigger; fires AnomalyEvent on surge
+  │
+  ├──▶ ParquetArchiver ──▶ GCS (raw anomaly Parquet, one file per event)
+  ├──▶ SQLite           — anomaly metadata for dashboard markers
+  └──▶ WebhookDispatcher ──▶ Discord alert
 
-dashboard_generator.py (separate process)
-  Redis + SQLite → Plotly HTML → GCS (index.html, every 5 min)
+── offline, runs locally ──────────────────────────────────────────────────────
+
+batch_enricher.py
+  │  downloads raw Parquet from GCS
+  ├──▶ DBSCANContextEngine  — SentenceTransformer → UMAP → DBSCAN → c-TF-IDF
+  ├──▶ story attribution    — links cluster items back to source stories
+  ├──▶ CandidateBuilder     — scores and classifies each cluster
+  └──▶ CandidateArchiver    — writes EventCandidate Parquet locally
 ```
+
+**Two-machine split:** the VM (e2-micro, 1 GB RAM) runs the live pipeline 24/7. The laptop runs the NLP enricher offline — SentenceTransformer alone exceeds VM memory.
+
+---
+
+## Platform Roadmap
+
+| Platform | Status | Notes |
+|---|---|---|
+| Hacker News | Live | Firebase REST API, 8 topic channels |
+| Reddit | Pending | API approval in progress |
+| Twitter/X | Planned | Requires reworked domain-spread scoring |
+
+All platform-specific logic is isolated in `src/ingestion/`. The anomaly detection, NLP, and EventCandidate layers are platform-neutral and require no changes when a new source is added.
 
 ---
 
@@ -37,256 +56,220 @@ dashboard_generator.py (separate process)
 
 ```
 src/
-  main.py                        Entry point — live_hn() and Reddit backtest
-  models.py                      AnomalyEvent, Comment dataclasses
+  main.py                     Entry points: live_hn() and Reddit backtest
+  models.py                   AnomalyEvent, Comment dataclasses
+
   ingestion/
-    hacker_news.py               Live Firebase ingestor + HNTopicRouter + CSV backtest
-    reddit.py                    Zstandard .zst file ingestor (backtest only)
+    base.py                   DataIngestor ABC — stream() → Iterator[Dict]
+    hacker_news.py            HackerNewsIngestor, HNTopicRouter, HNCsvIngestor
+    reddit.py                 ZstFileIngestor — backtest only
+
   pipeline/
-    sliding_tripwire.py          Z-score detector with Schmitt trigger hysteresis
-    tripwire.py                  Tumbling window detector (Reddit backtest only)
-    context.py                   DBSCANContextEngine — SentenceTransformer+UMAP+DBSCAN
-    alert_gate.py                Per-channel cooldown gate for Discord notifications
-    filter.py                    SubredditFilter — routes raw stream to channels
+    sliding_tripwire.py       Z-score Schmitt trigger detector
+    tripwire.py               Tumbling window detector (Reddit backtest only)
+    context.py                DBSCANContextEngine — embeddings → UMAP → DBSCAN
+    alert_gate.py             Per-channel 30-min cooldown gate
+    filter.py                 SubredditFilter — channel routing + bot removal
+
   storage/
-    state_manager.py             RedisStateManager — ZSET sliding window + history LIST
-    parquet_archiver.py          Writes one Parquet file per anomaly → GCS
+    state_manager.py          RedisStateManager — ZSET sliding window
+    parquet_archiver.py       Atomic Parquet writer → GCS (one file per anomaly)
+    candidate_archiver.py     Atomic Parquet writer for EventCandidates (local)
+
+  events/
+    models.py                 EventCandidate dataclass
+    classifier.py             classify() — kind + event_score from cluster features
+    candidate_builder.py      CandidateBuilder — maps enriched rows to candidates
+
   alerting/
-    webhooks.py                  WebhookDispatcher — Discord/Slack fire-and-forget
+    webhooks.py               WebhookDispatcher — Discord/Slack fire-and-forget
+
   reporting/
-    dashboard_generator.py       Plotly 4×2 trellis → uploads index.html to GCS
-    batch_enricher.py            Laptop NLP enricher — pulls GCS Parquet, adds clusters
-data/                            (gitignored)
+    batch_enricher.py         Offline: GCS download → DBSCAN → story attribution
+                              → EventCandidate classification → local Parquet
+    dashboard_generator.py    Plotly 4×2 channel dashboard → GCS index.html
+
+data/                         (gitignored)
+  parquet_enriched/           NLP-enriched Parquet with cluster + item attribution
+    .processed                Manifest of GCS blobs already enriched
+  event_candidates/           EventCandidate Parquet (date-partitioned, local only)
   dbs/
-    anomalies_hn_live.db         SQLite — anomaly metadata for dashboard red markers
-  parquet/                       Raw unenriched Parquet (one file per anomaly)
-  parquet_enriched/              NLP-enriched Parquet with cluster structure
-    .processed                   Manifest of GCS blobs already enriched
+    anomalies_hn_live.db      SQLite — anomaly metadata for dashboard markers
 ```
 
 ---
 
-## Detection Model
+## Detection Pipeline
 
-### Channel Routing (HNTopicRouter)
-Each HN story is classified into one channel by weighted keyword scoring:
-- **Tier 3** (weight 3): exact brand names — `gemini`, `openai`, `bitcoin`, `cve`
-- **Tier 2** (weight 2): domain jargon — `machine learning`, `vulnerability`, `blockchain`
-- **Tier 1** (weight 1): generic words — `ai`, `security`, `crypto`
-- **Domain boosts**: `arxiv.org` → science+3, `krebsonsecurity.com` → security+3, etc.
+### 1. Channel Routing
 
-Comments inherit their parent story's channel via an in-memory `_item_topics` cache.
-Stories with no keyword match go to `general`.
+Each HN story is scored against 8 topic channels using weighted keywords:
 
-### Sliding Window (RedisStateManager)
-- Each item stored in a Redis ZSET (`window:{channel}`) with Unix timestamp as score
-- `get_window_count(channel, now)` = items with timestamp in `[now-7200, now]` (2-hour window)
-- `baseline_tick()` fires every hour, pushes the 2-hour count to a Redis LIST (`history:{channel}`)
-- History capped at 168 entries (7 days × 24 hours)
+| Tier | Weight | Example |
+|---|---|---|
+| 3 | Exact brand / identifier | `openai`, `cve-`, `bitcoin` |
+| 2 | Domain jargon | `machine learning`, `vulnerability` |
+| 1 | Generic topic words | `ai`, `security`, `startup` |
 
-### Z-Score Detection (SlidingWindowTripwire)
+Domain boosts apply on top: `arxiv.org → science+3`, `krebsonsecurity.com → security+3`. Comments inherit their parent story's channel. Unmatched stories → `general`.
+
+### 2. Sliding Window + Z-Score
+
 ```
-MIN_HISTORY  = 24     # require 24 hourly samples before alerting (cold-start guard)
-MIN_COUNT    = 10     # ignore windows with fewer than 10 items (low-volume noise floor)
-Z_THRESHOLD  = 3.0   # enter ELEVATED state (anomaly begins)
-RELEASE      = 2.0   # exit ELEVATED state (anomaly ends)
-EVAL_INTERVAL     = 300s   (every 5 minutes)
-BASELINE_INTERVAL = 3600s  (every 1 hour)
+WINDOW_TTL        = 7200s   (2-hour sliding window)
+HISTORY_SIZE      = 168     (7 days of hourly counts)
+MIN_HISTORY       = 24      (cold-start guard)
+MIN_COUNT         = 10      (low-volume noise floor)
+Z_THRESHOLD       = 3.0     (enter ELEVATED)
+RELEASE_THRESHOLD = 2.0     (exit ELEVATED)
+EVAL_INTERVAL     = 300s
+BASELINE_INTERVAL = 3600s
 ```
 
-**Schmitt Trigger hysteresis**: once a channel enters ELEVATED (Z ≥ 3.0), it stays
-ELEVATED and fires events on every eval tick until Z drops to ≤ 2.0. This captures
-sustained surges without repeated false-start/stop noise.
+**Schmitt trigger hysteresis:** once ELEVATED (Z ≥ 3.0), stays ELEVATED until Z ≤ 2.0. Prevents false start/stop chatter during sustained surges.
 
-**Baseline freeze**: while ELEVATED, `baseline_tick()` pushes the last clean count
-instead of the anomalous current count, keeping the baseline anchored to pre-event
-ambient noise so Z-score doesn't decay to zero during a prolonged surge.
+**Baseline freeze:** while ELEVATED, the hourly push records the last clean count instead of the anomalous one — keeping the baseline anchored to pre-event ambient noise.
+
+### 3. NLP Enrichment (offline)
+
+```
+texts (up to 500 per anomaly)
+  ↓ SentenceTransformer("all-MiniLM-L6-v2")  — 384-dim embeddings
+  ↓ UMAP(n_components=2)                      — 2D projection
+  ↓ DBSCAN(eps=0.5, min_samples=5)            — density clusters
+  ↓ c-TF-IDF per cluster                      — top 8 distinctive keywords
+  ↓ story attribution                         — links items → source stories
+  ↓ CandidateBuilder                          — EventCandidate classification
+```
+
+### 4. EventCandidate Classification
+
+Each cluster is independently classified:
+
+| Kind | Condition |
+|---|---|
+| `unknown` | No attributed items — dropped silently |
+| `viral_post` | `top_story_pct ≥ 0.80` OR `unique_stories ≤ 1` |
+| `event_candidate` | `unique ≥ 3` AND `domains ≥ 2` AND `size ≥ 10` AND `keywords ≥ 2` |
+| `topic_surge` | Everything else |
+
+**Event score** (additive, 0–1):
+
+```
+0.25 × min(unique_stories / 5,  1.0)   conversation diversity
+0.20 × (1.0 - top_story_pct)           not dominated by one story
+0.20 × min(domain_count / 3,   1.0)   multi-source spread
+0.15 × min(cluster_size / 100, 1.0)   volume
+0.10 × min(z_score / 10.0,     1.0)   anomaly strength
+0.10 × min(keyword_count / 5,  1.0)   cluster coherence
+```
 
 ---
 
-## Parquet Schema
+## Data Schemas
 
-One file per anomaly tick: `data/parquet/{YYYY}/{MM}/{DD}/{channel}_{window_end}.parquet`
+### Raw Anomaly Parquet
+`parquet/{YYYY}/{MM}/{DD}/{channel}_{window_end}.parquet` (GCS)
 
 | Column | Type | Description |
 |---|---|---|
-| channel | string | HN topic channel (ai, tech, etc.) |
-| window_start | int64 | Unix timestamp — start of 2-hour window |
-| window_end | int64 | Unix timestamp — end of 2-hour window |
-| window_end_dt | string | Human-readable UTC datetime |
-| count | int64 | Number of items in the 2-hour window |
-| z_score | float64 | Z-score at detection time |
-| mean | float64 | Baseline mean at detection time |
-| std | float64 | Baseline std at detection time |
-| texts | list\<string\> | Up to 500 raw comment/title bodies |
-| clusters | list\<struct\> | NLP clusters (empty on VM, filled by enricher) |
+| channel | string | Topic channel |
+| window_start / window_end | int64 | Unix timestamps |
+| window_end_dt | string | Human-readable UTC |
+| count | int64 | Items in 2-hour window |
+| z_score / mean / std | float64 | Detection statistics |
+| texts | list\<string\> | Up to 500 raw comment bodies |
+| items | list\<struct\> | Per-item metadata (see below) |
+| clusters | list\<struct\> | Filled by enricher (empty on VM) |
 
-**Cluster struct**: `{cluster_id: int, size: int, noise_count: int, keywords: list<string>}`
+**Item struct:** `{item_id, text, story_id, story_title, domain, item_type, created_at}`
 
-Enriched files written to: `data/parquet_enriched/{YYYY}/{MM}/{DD}/{channel}_{window_end}.parquet`
+**Cluster struct:** `{cluster_id, size, noise_count, keywords, top_story_id, top_story_title, top_story_pct, unique_story_count, story_ids, top_domains}`
+
+### EventCandidate Parquet
+`data/event_candidates/{YYYY}/{MM}/{DD}/candidates_{channel}_{window_end}.parquet` (local)
+
+| Column | Type | Description |
+|---|---|---|
+| candidate_id | string | `{source}:{channel}:{window_end}:{cluster_id}` |
+| source | string | `hacker_news`, `reddit`, … |
+| channel | string | Topic channel |
+| kind | string | `viral_post` / `topic_surge` / `event_candidate` |
+| event_score | float64 | 0–1 composite score |
+| unique_conversation_count | int64 | Distinct stories in cluster |
+| top_conversation_pct | float64 | Fraction from dominant story |
+| top_story_id / top_story_title | int64 / string | Dominant story |
+| top_domains | list\<string\> | Up to 5 most common domains |
+| keywords | list\<string\> | c-TF-IDF cluster labels |
+| z_score / window_count | float64 / int64 | Parent anomaly stats |
 
 ---
 
-## GCS Bucket Layout
+## GCS Bucket
 
-Bucket: `hn-surge-dashboard-01` (project: `project-8299dfb6-57e5-4dcf-bc0`)
+Bucket: `hn-surge-dashboard-01`
 
 ```
-parquet/YYYY/MM/DD/{channel}_{window_end}.parquet   ← raw anomaly ticks (VM uploads)
-index.html                                           ← live Plotly dashboard (refreshed every 5 min)
+parquet/YYYY/MM/DD/{channel}_{window_end}.parquet   ← raw anomaly ticks
+index.html                                           ← live Plotly dashboard
 ```
 
-Public URL: `https://storage.googleapis.com/hn-surge-dashboard-01/index.html`
+Public dashboard: `https://storage.googleapis.com/hn-surge-dashboard-01/index.html`
 
 ---
 
-## VM Setup (e2-micro, Debian)
+## VM Setup (e2-micro, Ubuntu 22.04)
 
-### First-time setup
 ```bash
-# Install Docker
-sudo apt-get update && sudo apt-get install -y docker.io
-sudo usermod -aG docker $USER && newgrp docker
-
-# Start Redis (persistent, auto-restarts on reboot)
+# Redis
 docker run --name hn-redis -p 6379:6379 -d \
   --restart unless-stopped \
   -v redis-data:/data \
   redis:alpine redis-server --save 60 1
 
-# Clone repo and install lean deps (no PyTorch)
+# Repo
 git clone https://github.com/Umi9973/Reddit-Surge-Detection.git
 cd Reddit-Surge-Detection
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-
-# GCP auth
 gcloud auth application-default login
+export WEBHOOK_URL="https://discord.com/api/webhooks/..."
 ```
 
-### Environment variables
 ```bash
-export WEBHOOK_URL="https://discord.com/api/webhooks/..."   # Discord webhook (never commit)
-```
-
-### Running (use tmux — two separate sessions)
-```bash
-# Session 1: live pipeline
-source venv/bin/activate
+# Session 1 — live pipeline
 python3 -m src.main
 
-# Session 2: dashboard generator
-source venv/bin/activate
+# Session 2 — dashboard (separate tmux window)
 python3 -m src.reporting.dashboard_generator
 ```
 
-### Updating code (no warm-up required — Redis is untouched)
+**Updating (no warm-up required):**
 ```bash
-# Session 1 only (Ctrl+C, then):
-git pull origin feature/phase-2
-python3 -m src.main
-# Leave Session 2 running — dashboard_generator doesn't need restart
+git pull origin feature/phase-2 && python3 -m src.main
 ```
 
-### What wipes the 24-hour warm-up
-| Action | Wipes Redis? | Warm-up needed? |
+| Action | Wipes Redis? | Re-warm needed? |
 |---|---|---|
-| `git pull` + restart `src.main` | No | No |
-| VM reboot (with volume mount) | No (RDB snapshot) | No |
-| `docker restart hn-redis` | Yes | Yes |
-| `redis-cli FLUSHDB` | Yes | Yes |
+| `git pull` + restart | No | No |
+| VM reboot (volume mounted) | No | No |
+| `docker restart hn-redis` | Yes | Yes (24 h) |
+| `redis-cli FLUSHDB` | Yes | Yes (24 h) |
 
 ---
 
 ## Laptop Setup (NLP enricher)
 
-Requires the heavy ML stack (PyTorch, sentence-transformers) — do NOT install on VM.
-
 ```bash
-pip install sentence-transformers umap-learn scikit-learn
+pip install sentence-transformers umap-learn scikit-learn pyarrow
 gcloud auth application-default login
 ```
 
-### Running the enricher
 ```bash
-cd Reddit-Surge-Detection
 python -m src.reporting.batch_enricher
 ```
 
-The enricher:
-1. Lists GCS blobs under `parquet/`
-2. Skips blobs already in `data/parquet_enriched/.processed`
-3. Downloads each new file, runs `DBSCANContextEngine` (SentenceTransformer → UMAP → DBSCAN → c-TF-IDF)
-4. Writes enriched Parquet to `data/parquet_enriched/` with cluster structure
-5. Marks blob as done in `.processed`
-
-Run it whenever you want to analyse recent anomalies — no scheduling required.
-
----
-
-## NLP Pipeline (DBSCANContextEngine)
-
-Located in `src/pipeline/context.py`.
-
-```
-texts (up to 500)
-  ↓ SentenceTransformer("all-MiniLM-L6-v2")   ~384-dim embeddings
-  ↓ UMAP(n_components=2, random_state=42)       2D projection
-  ↓ DBSCAN(eps=0.5, min_samples=5)              cluster labels (-1 = noise)
-  ↓ c-TF-IDF per cluster                        top 8 keywords each
-  ↓ dynamic baseline penalty                    suppresses chronically common words
-```
-
-Returns a list of cluster dicts: `{cluster_id, size, noise_count, keywords}`.
-Returns `[]` if fewer than 5 texts or all points are noise.
-
----
-
-## Discord Alerts (WebhookDispatcher)
-
-Reads `WEBHOOK_URL` from environment. Fires in a background thread (fire-and-forget).
-No-op if env var is unset. Rate-limit backoff: HTTP 429 → sleeps and retries once.
-
-Alert format:
-```
-🚨 Surge Detected — ai
-Count: 375 | Z-score: 3.54 | 2026-05-19 19:30 UTC
-```
-
----
-
-## Dashboard (dashboard_generator.py)
-
-- Reads Redis `history:{channel}` LISTs → blue baseline lines (hourly counts)
-- Reads SQLite `anomalies_hn_live.db` → red × markers (anomaly timestamps)
-- 4×2 Plotly trellis: ai, tech, security, startup, crypto, science, policy, general
-- Uploads `index.html` to GCS every 5 minutes
-- Dark theme: `paper_bgcolor="#1a1a2e"`, `plot_bgcolor="#16213e"`
-
-**Known behaviour**: baseline lines look perfectly straight for the first 2 hours of
-operation. This is a fill-up artifact — the 2-hour ZSET window starts at 0 and
-grows monotonically until it reaches steady state. After 2+ hours the lines
-become naturally jagged.
-
----
-
-## Key Constants (quick reference)
-
-| Constant | Value | Location |
-|---|---|---|
-| MIN_HISTORY | 24 hours | sliding_tripwire.py |
-| MIN_COUNT | 10 items | sliding_tripwire.py |
-| Z_THRESHOLD | 3.0 | sliding_tripwire.py |
-| RELEASE_THRESHOLD | 2.0 | sliding_tripwire.py |
-| WINDOW_TTL | 7200s (2hr) | state_manager.py |
-| HISTORY_SIZE | 168 (7 days) | state_manager.py |
-| TEXT_CAP | 500 texts | state_manager.py |
-| EVAL_INTERVAL | 300s (5 min) | sliding_tripwire.py |
-| BASELINE_INTERVAL | 3600s (1 hr) | sliding_tripwire.py |
-| REFRESH_SEC | 300s (5 min) | dashboard_generator.py |
-| GCS_BUCKET | hn-surge-dashboard-01 | parquet_archiver.py |
-| GCS_PROJECT | project-8299dfb6-57e5-4dcf-bc0 | parquet_archiver.py |
+The enricher downloads raw Parquet from GCS, runs NLP enrichment, attributes items to source stories, classifies clusters into EventCandidates, and writes results locally. Re-run whenever you want to analyse recent anomalies. To force re-processing of all files, delete `data/parquet_enriched/.processed`.
 
 ---
 
