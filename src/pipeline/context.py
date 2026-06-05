@@ -57,6 +57,8 @@ class DBSCANContextEngine(NLPContextEngine):
         "https", "http", "www", "com", "org", "net", "html", "utm", "amp",
         # Artifact keywords — recurring ghost tokens with no topic signal
         "delayed", "deleted", "highest", "setting",
+        # HN "Who's Hiring?" sticky thread template fields — not topic words
+        "relocate", "willing", "technologies",
     }
 
     # When DBSCAN finds only one cluster, IDF is flat (every word scores 1.0),
@@ -78,6 +80,8 @@ class DBSCANContextEngine(NLPContextEngine):
         # Artifact keywords carried over from base stopwords extension
         "delayed", "highest", "setting", "https", "http", "www",
         "com", "org", "net", "html", "utm", "amp",
+        # HN "Who's Hiring?" sticky thread template fields
+        "relocate", "willing", "technologies",
     }
 
     def __init__(
