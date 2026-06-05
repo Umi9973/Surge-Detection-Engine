@@ -33,6 +33,7 @@ STREAM_CUTOFF_TS = 1701388800  # 2023-12-01 00:00:00 UTC
 _ROOT       = Path(__file__).resolve().parent.parent
 DB_PATH     = str(_ROOT / "data" / "dbs" / "anomalies.db")
 LIVE_DB     = str(_ROOT / "data" / "dbs" / "anomalies_hn_live.db")
+AUDIT_DB    = str(_ROOT / "data" / "dbs" / "routing_audit.db")
 DATA_FILE   = str(_ROOT / "data" / "raw_dumps" / "RC_2023-11.zst")
 PARQUET_DIR = _ROOT / "data" / "parquet"
 
@@ -185,6 +186,55 @@ def _save_live_anomaly(conn: sqlite3.Connection, ev: AnomalyEvent) -> None:
     conn.commit()
 
 
+def _init_audit_db(path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS routing_audit (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts                INTEGER NOT NULL,
+            story_id          INTEGER NOT NULL,
+            story_title       TEXT    NOT NULL,
+            domain            TEXT    NOT NULL,
+            assigned_channel  TEXT    NOT NULL,
+            top_score         REAL    NOT NULL,
+            second_channel    TEXT    NOT NULL,
+            second_score      REAL    NOT NULL,
+            score_margin      REAL    NOT NULL,
+            matched_keywords  TEXT    NOT NULL,
+            domain_boost_used TEXT    NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_routing_ts      ON routing_audit(ts);
+        CREATE INDEX IF NOT EXISTS idx_routing_channel ON routing_audit(assigned_channel);
+        CREATE INDEX IF NOT EXISTS idx_routing_margin  ON routing_audit(score_margin);
+    """)
+    conn.commit()
+    return conn
+
+
+def _save_routing_audit(conn: sqlite3.Connection, raw: Dict) -> None:
+    r = raw.get("routing") or {}
+    conn.execute(
+        "INSERT INTO routing_audit "
+        "(ts, story_id, story_title, domain, assigned_channel, top_score, "
+        " second_channel, second_score, score_margin, matched_keywords, domain_boost_used) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            int(raw.get("timestamp", 0)),
+            int(raw.get("story_id", 0)),
+            raw.get("story_title", ""),
+            raw.get("domain", ""),
+            r.get("channel", "general"),
+            r.get("top_score", 0.0),
+            r.get("second_channel", ""),
+            r.get("second_score", 0.0),
+            r.get("score_margin", 0.0),
+            ", ".join(r.get("matched_keywords") or []),
+            r.get("domain_boost_used", ""),
+        ),
+    )
+    conn.commit()
+
+
 def _to_comment(raw: Dict) -> Comment:
     return Comment(
         id          = raw.get("id", ""),
@@ -237,6 +287,7 @@ def live_hn(use_real_redis: bool = True) -> None:
     archiver   = ParquetArchiver(PARQUET_DIR)
     archiver.retry_pending()
     live_conn  = _init_live_db(LIVE_DB)
+    audit_conn = _init_audit_db(AUDIT_DB)
 
     def fire_ticks(up_to: int) -> None:
         while True:
@@ -274,11 +325,15 @@ def live_hn(use_real_redis: bool = True) -> None:
                 ticks["eval"] = ((ts // EVAL_INTERVAL) + 1) * EVAL_INTERVAL
                 ticks["base"] = ((ts // BASELINE_INTERVAL) + 1) * BASELINE_INTERVAL
 
+            if raw.get("item_type") == "story" and raw.get("routing"):
+                _save_routing_audit(audit_conn, raw)
+
             fire_ticks(ts - 1)
             tripwire.ingest(_to_comment(raw))
     finally:
         archiver.close()
         live_conn.close()
+        audit_conn.close()
 
 
 if __name__ == "__main__":

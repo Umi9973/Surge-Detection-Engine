@@ -119,34 +119,67 @@ class HNTopicRouter:
     """
 
     def __init__(self) -> None:
-        self._patterns: Dict[str, List[Tuple[re.Pattern, float]]] = {
-            channel: [(_build_pattern(kw), weight) for kw, weight in entries]
+        # Each entry: (compiled_pattern, keyword_string, weight)
+        self._patterns: Dict[str, List[Tuple[re.Pattern, str, float]]] = {
+            channel: [(_build_pattern(kw), kw, weight) for kw, weight in entries]
             for channel, entries in TOPIC_CHANNELS.items()
         }
 
     def classify(self, title: str, url: Optional[str] = None) -> str:
         """Return channel with highest weighted score, or 'general' if zero."""
-        scores: Dict[str, float] = {}
+        return self.classify_with_audit(title, url)["channel"]
 
-        for channel, pat_weights in self._patterns.items():
-            total = sum(w for pat, w in pat_weights if pat.search(title))
+    def classify_with_audit(self, title: str, url: Optional[str] = None) -> Dict:
+        """Return full routing decision including scores, keywords, and domain boost."""
+        channel_scores:   Dict[str, float]      = {}
+        channel_keywords: Dict[str, List[str]]  = {}
+
+        for channel, pat_kw_weights in self._patterns.items():
+            matched, total = [], 0.0
+            for pat, kw, weight in pat_kw_weights:
+                if pat.search(title):
+                    total  += weight
+                    matched.append(kw)
             if total > 0:
-                scores[channel] = total
+                channel_scores[channel]   = total
+                channel_keywords[channel] = matched
 
+        domain_boost_str = ""
         if url:
             domain = _extract_domain(url)
             if domain in DOMAIN_BOOSTS:
                 ch, boost = DOMAIN_BOOSTS[domain]
-                scores[ch] = scores.get(ch, 0) + boost
+                channel_scores[ch]   = channel_scores.get(ch, 0) + boost
+                domain_boost_str     = f"{domain} → {ch}+{int(boost)}"
 
-        if not scores:
-            return "general"
+        if not channel_scores:
+            return {
+                "channel": "general", "top_score": 0.0,
+                "second_channel": "", "second_score": 0.0, "score_margin": 0.0,
+                "matched_keywords": [], "domain_boost_used": "",
+            }
 
-        best_score = max(scores.values())
-        for channel in _PRIORITY:
-            if scores.get(channel, 0) == best_score:
-                return channel
-        return max(scores, key=scores.__getitem__)
+        best_score = max(channel_scores.values())
+        winner = next(
+            (ch for ch in _PRIORITY if channel_scores.get(ch, 0) == best_score),
+            max(channel_scores, key=channel_scores.__getitem__),
+        )
+
+        others = sorted(
+            [(ch, s) for ch, s in channel_scores.items() if ch != winner],
+            key=lambda x: -x[1],
+        )
+        second_ch, second_score = others[0] if others else ("", 0.0)
+
+        return {
+            "channel":         winner,
+            "top_score":       best_score,
+            "second_channel":  second_ch,
+            "second_score":    second_score,
+            "score_margin":    round(best_score - second_score, 2),
+            "matched_keywords": channel_keywords.get(winner, []),
+            "domain_boost_used": domain_boost_str,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -212,14 +245,16 @@ class _HNItemProcessor:
                 continue
 
             if item["type"] == "story":
-                title   = item.get("title", "")
-                url     = item.get("url", "")
-                channel = self._router.classify(title, url=url)
+                title    = item.get("title", "")
+                url      = item.get("url", "")
+                decision = self._router.classify_with_audit(title, url=url)
+                channel  = decision["channel"]
                 self._item_topics[item_id] = channel
                 self._item_story[item_id]  = item_id
                 self._story_meta[item_id]  = {
-                    "title":  title,
-                    "domain": _extract_domain(url),
+                    "title":   title,
+                    "domain":  _extract_domain(url),
+                    "routing": decision,
                 }
 
             else:  # comment
@@ -276,6 +311,7 @@ class _HNItemProcessor:
             "item_type":   item.get("type", ""),
             "item_id":     item.get("id", 0),
             "created_at":  item.get("time", 0),
+            "routing":     meta.get("routing"),   # RoutingDecision dict; None for evicted stories
         }
 
 
