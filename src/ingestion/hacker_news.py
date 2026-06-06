@@ -25,8 +25,9 @@ from .base import DataIngestor
 TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
     "ai": [
         ("gpt", 3), ("llm", 3), ("openai", 3), ("chatgpt", 3), ("anthropic", 3),
-        ("mistral", 3), ("llama", 3), ("gemini", 3), ("claude", 3),
+        ("mistral", 3), ("llama", 3), ("gemini", 3), ("claude", 3), ("rlhf", 3),
         ("machine learning", 2), ("deep learning", 2), ("neural network", 2),
+        ("fine-tuning", 2), ("foundation model", 2),
         ("neural", 1), ("ai", 1),
     ],
     "security": [
@@ -58,7 +59,7 @@ TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
         ("amazon", 3), ("meta", 3),
         ("home assistant", 2), ("sqlite", 2), ("postgres", 2), ("oauth", 2),
         ("gpu", 2), ("chip", 2), ("hardware", 2),
-        ("database", 1), ("software", 1),
+        ("database", 1), ("software", 1), ("laptop", 1), ("open source", 1),
     ],
     "policy": [
         ("gdpr", 3), ("antitrust", 3), ("sec", 3), ("congress", 3), ("senate", 3),
@@ -95,7 +96,8 @@ _PRIORITY: List[str] = [
 
 # Keywords where we want left-boundary only so inflected forms match:
 # hack → hacker/hacked/hacking, breach → breached/breaching, exploit → exploited/exploiting
-_PREFIX_ROOTS: frozenset = frozenset({"hack", "breach", "exploit"})
+# llm → LLMs, LLM-based, LLM-powered
+_PREFIX_ROOTS: frozenset = frozenset({"hack", "breach", "exploit", "llm", "foundation model"})
 
 
 def _build_pattern(kw: str) -> re.Pattern:
