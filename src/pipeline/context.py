@@ -101,6 +101,14 @@ class DBSCANContextEngine(NLPContextEngine):
         self._baseline_counts: Counter = Counter()
         self._hour_buckets: deque = deque()  # (window_start: int, counts: Counter)
 
+    @property
+    def dbscan_eps(self) -> float:
+        return self._dbscan_eps
+
+    @property
+    def dbscan_min_samples(self) -> int:
+        return self._dbscan_min_samples
+
     def update_baseline(self, window_start: int, token_counts: Counter) -> None:
         """Accumulate token counts into the rolling baseline; prune buckets older than 7 days."""
         self._hour_buckets.append((window_start, token_counts))

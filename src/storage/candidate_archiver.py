@@ -26,6 +26,8 @@ _CANDIDATE_SCHEMA = pa.schema([
     pa.field("keywords",                  pa.list_(pa.string())),
     pa.field("z_score",                   pa.float64()),
     pa.field("window_count",              pa.int64()),
+    pa.field("dbscan_eps",               pa.float64()),
+    pa.field("dbscan_min_samples",       pa.int64()),
 ])
 
 
@@ -76,6 +78,8 @@ class CandidateArchiver:
                 "keywords":                  [c.keywords                  for c in candidates],
                 "z_score":                   [c.z_score                   for c in candidates],
                 "window_count":              [c.window_count              for c in candidates],
+                "dbscan_eps":               [c.dbscan_eps               for c in candidates],
+                "dbscan_min_samples":       [c.dbscan_min_samples       for c in candidates],
             },
             schema=_CANDIDATE_SCHEMA,
         )

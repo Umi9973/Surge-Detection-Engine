@@ -76,7 +76,11 @@ def run() -> None:
     client     = storage.Client(project=_GCS_PROJECT)
     bucket     = client.bucket(_GCS_BUCKET)
     nlp        = DBSCANContextEngine()
-    builder    = CandidateBuilder(source="hacker_news")
+    builder    = CandidateBuilder(
+        source="hacker_news",
+        dbscan_eps=nlp.dbscan_eps,
+        dbscan_min_samples=nlp.dbscan_min_samples,
+    )
     c_archiver = CandidateArchiver(_LOCAL_CANDIDATES)
     done       = _load_done()
 

@@ -7,8 +7,15 @@ from .models import EventCandidate
 
 
 class CandidateBuilder:
-    def __init__(self, source: str = "hacker_news") -> None:
-        self._source = source
+    def __init__(
+        self,
+        source: str = "hacker_news",
+        dbscan_eps: float = 0.5,
+        dbscan_min_samples: int = 5,
+    ) -> None:
+        self._source             = source
+        self._dbscan_eps         = dbscan_eps
+        self._dbscan_min_samples = dbscan_min_samples
 
     def from_enriched_row(self, row: dict) -> List[EventCandidate]:
         """Convert one enriched Parquet row into a list of EventCandidates.
@@ -57,4 +64,6 @@ class CandidateBuilder:
             keywords                  = cluster.get("keywords") or [],
             z_score                   = z_score,
             window_count              = window_count,
+            dbscan_eps                = self._dbscan_eps,
+            dbscan_min_samples        = self._dbscan_min_samples,
         )

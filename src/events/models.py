@@ -22,3 +22,5 @@ class EventCandidate:
     keywords:                  List[str] = field(default_factory=list)
     z_score:                   float = 0.0
     window_count:              int   = 0
+    dbscan_eps:                float = 0.5
+    dbscan_min_samples:        int   = 5
