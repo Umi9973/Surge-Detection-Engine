@@ -23,6 +23,10 @@ class NLPContextEngine(ABC):
 
 
 class DBSCANContextEngine(NLPContextEngine):
+    # Channel-specific eps overrides. Empty = 0.5 default for all channels.
+    # Experiment with general at 0.35 showed fragmentation was worse, not better.
+    _CHANNEL_EPS: Dict[str, float] = {}
+
     _STOPWORDS = {
         "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
         "of", "with", "is", "it", "this", "that", "was", "are", "be", "have",
@@ -109,6 +113,9 @@ class DBSCANContextEngine(NLPContextEngine):
     def dbscan_min_samples(self) -> int:
         return self._dbscan_min_samples
 
+    def eps_for_channel(self, channel: str) -> float:
+        return self._CHANNEL_EPS.get(channel, self._dbscan_eps)
+
     def update_baseline(self, window_start: int, token_counts: Counter) -> None:
         """Accumulate token counts into the rolling baseline; prune buckets older than 7 days."""
         self._hour_buckets.append((window_start, token_counts))
@@ -168,13 +175,19 @@ class DBSCANContextEngine(NLPContextEngine):
             return filtered or ranked
         return ranked
 
-    def summarize_anomaly(self, texts: List[str], window_start: int = 0) -> List[Dict]:
+    def summarize_anomaly(
+        self,
+        texts: List[str],
+        window_start: int = 0,
+        channel: str = "",
+    ) -> List[Dict]:
         if len(texts) < self._dbscan_min_samples:
             return []
 
+        eps = self.eps_for_channel(channel)
         embeddings = self._model.encode(texts, show_progress_bar=False)
         reduced = self._umap.fit_transform(embeddings)
-        labels = DBSCAN(eps=self._dbscan_eps, min_samples=self._dbscan_min_samples).fit_predict(reduced)
+        labels = DBSCAN(eps=eps, min_samples=self._dbscan_min_samples).fit_predict(reduced)
 
         clusters: Dict[int, List[str]] = {}
         cluster_indices: Dict[int, List[int]] = {}
