@@ -12,12 +12,14 @@ Options:
     --min-score  FLOAT             minimum event_score
     --limit  N                     max rows to print (default 50)
     --sort  score|time             sort order (default: score)
+    --summary                      print quality diagnostics instead of individual blocks
 """
 from __future__ import annotations
 
 import argparse
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -114,6 +116,93 @@ def _print_row(row: dict) -> None:
     print(f"  KW     : {kws}")
 
 
+_HIRING_MARKERS = ("who is hiring", "who wants to be hired", "who's hiring")
+
+
+def _print_summary(rows: List[dict], days: int) -> None:
+    total = len(rows)
+    if total == 0:
+        print("No candidates.")
+        return
+
+    events  = [r for r in rows if r.get("kind") == "event_candidate"]
+    virals  = [r for r in rows if r.get("kind") == "viral_post"]
+    surges  = [r for r in rows if r.get("kind") == "topic_surge"]
+
+    div = "─" * 72
+    print(div)
+    print(f"  EventCandidate Quality Report  —  last {days}d  ({total} total)")
+    print(div)
+
+    # --- Kind breakdown ---
+    print(f"\n  Kind breakdown")
+    print(f"    event_candidate : {len(events):>4}  ({100*len(events)//total:>2}%)")
+    print(f"    viral_post      : {len(virals):>4}  ({100*len(virals)//total:>2}%)")
+    print(f"    topic_surge     : {len(surges):>4}  ({100*len(surges)//total:>2}%)")
+
+    # --- Channel breakdown for EVENT candidates ---
+    print(f"\n  EVENT candidates by channel")
+    ch_counts = Counter(r.get("channel", "") for r in events)
+    for ch, n in ch_counts.most_common():
+        flag = "  ← check DBSCAN epsilon" if ch == "general" and n > 3 else ""
+        print(f"    {ch:<12}: {n:>4}{flag}")
+
+    # --- Quality red flags (EVENT only) ---
+    low_z       = [r for r in events if (r.get("z_score") or 0.0) < 3.0]
+    from_general = [r for r in events if r.get("channel") == "general"]
+    hiring_leak = [
+        r for r in events
+        if any(m in (r.get("top_story_title") or "").lower() for m in _HIRING_MARKERS)
+    ]
+    low_score   = sorted(events, key=lambda r: r.get("event_score") or 0.0)[:5]
+
+    print(f"\n  Quality flags (EVENT candidates)")
+    print(f"    z < 3.0 (weak anomaly)    : {len(low_z):>4}  / {len(events)}")
+    print(f"    from general channel      : {len(from_general):>4}  / {len(events)}")
+    print(f"    hiring-thread leakage     : {len(hiring_leak):>4}  / {len(events)}")
+
+    # --- Top repeated keywords (EVENT only, signals cluster contamination) ---
+    kw_counter: Counter = Counter()
+    for r in events:
+        for kw in (r.get("keywords") or []):
+            kw_counter[kw] += 1
+    print(f"\n  Top keywords across EVENT candidates (contamination check)")
+    for kw, n in kw_counter.most_common(12):
+        bar = "█" * min(n, 20)
+        print(f"    {kw:<20} {n:>3}  {bar}")
+
+    # --- Top repeated top stories (EVENT only) ---
+    story_counter: Counter = Counter()
+    for r in events:
+        title = (r.get("top_story_title") or "").strip()
+        if title:
+            story_counter[title] += 1
+    print(f"\n  Top repeated top-stories in EVENT candidates")
+    print(f"  (>1 appearance = multiple windows attributed to same story)")
+    for title, n in story_counter.most_common(8):
+        print(f"    [{n:>2}x]  {title[:60]}")
+
+    # --- Lowest-scoring EVENT candidates ---
+    print(f"\n  Lowest-scoring EVENT candidates (quality floor check)")
+    for r in low_score:
+        title = (r.get("top_story_title") or "(no title)")[:50]
+        print(
+            f"    score={r.get('event_score', 0):.4f}  z={r.get('z_score', 0):.2f}"
+            f"  {r.get('channel',''):<10}  \"{title}\""
+        )
+
+    # --- Hiring leakage detail ---
+    if hiring_leak:
+        print(f"\n  Hiring-thread leakage detail")
+        for r in hiring_leak:
+            print(
+                f"    score={r.get('event_score', 0):.4f}  "
+                f"kw={', '.join((r.get('keywords') or [])[:4])}"
+            )
+
+    print(f"\n{div}")
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -134,6 +223,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                         help="max rows to print (default 50)")
     parser.add_argument("--sort",      choices=["score", "time"], default="score",
                         help="sort by score desc (default) or time desc")
+    parser.add_argument("--summary",   action="store_true",
+                        help="print quality diagnostics instead of individual blocks")
     args = parser.parse_args(argv)
 
     files = _collect_files(args.date, args.days)
@@ -146,6 +237,10 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if not rows:
         print("No candidates match the given filters.")
+        return
+
+    if args.summary:
+        _print_summary(rows, args.days if not args.date else 0)
         return
 
     if args.sort == "score":
