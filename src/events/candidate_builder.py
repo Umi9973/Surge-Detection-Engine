@@ -38,6 +38,7 @@ class CandidateBuilder:
         eps was applied during enrichment so the actual value is stamped on candidates.
         """
         channel      = row.get("channel", "")
+        window_start = row.get("window_start", 0)
         window_end   = row.get("window_end", 0)
         z_score      = float(row.get("z_score", 0.0))
         window_count = int(row.get("count", 0))
@@ -45,7 +46,7 @@ class CandidateBuilder:
 
         candidates: List[EventCandidate] = []
         for cluster in (row.get("clusters") or []):
-            candidate = self._build(cluster, channel, window_end, z_score, window_count, effective_eps)
+            candidate = self._build(cluster, channel, window_start, window_end, z_score, window_count, effective_eps)
             if candidate is not None:
                 candidates.append(candidate)
         return candidates
@@ -54,6 +55,7 @@ class CandidateBuilder:
         self,
         cluster:      dict,
         channel:      str,
+        window_start: int,
         window_end:   int,
         z_score:      float,
         window_count: int,
@@ -72,6 +74,7 @@ class CandidateBuilder:
             candidate_id              = f"{self._source}:{channel}:{window_end}:{cluster_id}",
             source                    = self._source,
             channel                   = channel,
+            window_start              = window_start,
             window_end                = window_end,
             cluster_id                = cluster_id,
             kind                      = kind,
@@ -81,6 +84,7 @@ class CandidateBuilder:
             top_conversation_pct      = cluster.get("top_story_pct", 0.0),
             top_story_id              = cluster.get("top_story_id", 0),
             top_story_title           = cluster.get("top_story_title", ""),
+            conversation_ids          = cluster.get("story_ids") or [],
             top_domains               = cluster.get("top_domains") or [],
             keywords                  = cluster.get("keywords") or [],
             z_score                   = z_score,

@@ -112,8 +112,9 @@ def run() -> None:
             texts = row.get("texts") or []
             items = row.get("items") or []
 
+            channel = row.get("channel", "")
             raw_clusters = (
-                nlp.summarize_anomaly(texts, window_start=row["window_start"])
+                nlp.summarize_anomaly(texts, window_start=row["window_start"], channel=channel)
                 if len(texts) >= _MIN_TEXTS_FOR_CLUSTERING
                 else []
             )
@@ -155,7 +156,8 @@ def run() -> None:
                 })
 
             enriched_rows.append(row)
-            blob_candidates.extend(builder.from_enriched_row(row))
+            actual_eps = nlp.eps_for_channel(channel)
+            blob_candidates.extend(builder.from_enriched_row(row, dbscan_eps=actual_eps))
 
         groups: Dict[tuple, List[EventCandidate]] = {}
         for cand in blob_candidates:
