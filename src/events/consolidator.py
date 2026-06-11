@@ -73,9 +73,9 @@ class EventConsolidator:
             active_events = still_active
 
             # Score evidence against all active events
-            best_event, best_score = self._best_match(evidence, active_events)
+            best_event, best_score, breakdown = self._best_match(evidence, active_events)
             if best_event is not None:
-                self._merge(best_event, evidence)
+                self._merge(best_event, evidence, best_score, breakdown)
             else:
                 active_events.append(self._new_event(evidence))
 
@@ -103,16 +103,17 @@ class EventConsolidator:
         self,
         evidence: EventEvidence,
         active: List[TrackedEvent],
-    ) -> Tuple[Optional[TrackedEvent], float]:
-        best_ev    = None
-        best_score = 0.0
+    ) -> Tuple[Optional[TrackedEvent], float, dict]:
+        best_ev        = None
+        best_score     = 0.0
+        best_breakdown: dict = {}
         for ev in active:
-            s = self._policy.score(evidence, ev)
+            s, breakdown = self._policy.score(evidence, ev)
             if s > best_score:
-                best_ev, best_score = ev, s
+                best_ev, best_score, best_breakdown = ev, s, breakdown
         if best_score >= self._policy.merge_threshold:
-            return best_ev, best_score
-        return None, 0.0
+            return best_ev, best_score, best_breakdown
+        return None, 0.0, {}
 
     # ------------------------------------------------------------------
     # Event creation
@@ -129,36 +130,56 @@ class EventConsolidator:
             event_id = evidence.candidate_id
 
         title = evidence.top_conversation_title or ""
+        seed_trace = {
+            "candidate_id":          evidence.candidate_id,
+            "candidate_time":        evidence.window_end,
+            "merge_score":           None,
+            "merge_reason":          None,
+            "top_conversation_match": None,
+            "conversation_overlap":  None,
+            "keyword_overlap":       None,
+            "domain_overlap":        None,
+            "was_seed_candidate":    True,
+        }
+        anchor_ids = [evidence.top_conversation_id] if evidence.top_conversation_id else []
         return TrackedEvent(
-            event_id             = event_id,
-            sources              = [evidence.source],
-            source_counts        = {evidence.source: 1},
-            channels             = [evidence.channel],
-            primary_channel      = evidence.channel,
-            first_seen           = evidence.window_start,
-            last_seen            = evidence.window_end,
-            duration_minutes     = (evidence.window_end - evidence.window_start) / 60,
-            candidate_ids        = [evidence.candidate_id],
-            candidate_count      = 1,
-            representative_title = title,
-            top_titles           = [title] if title else [],
-            keywords             = list(evidence.keywords),
-            conversation_ids     = list(evidence.conversation_ids),
-            top_conversation_id  = evidence.top_conversation_id,
-            domains              = list(evidence.domains),
-            communities          = list(evidence.communities),
-            total_item_count     = evidence.item_count,
-            peak_score           = evidence.event_score,
-            avg_score            = evidence.event_score,
-            peak_z_score         = evidence.z_score,
-            status               = "active",
+            event_id                = event_id,
+            sources                 = [evidence.source],
+            source_counts           = {evidence.source: 1},
+            channels                = [evidence.channel],
+            primary_channel         = evidence.channel,
+            first_seen              = evidence.window_start,
+            last_seen               = evidence.window_end,
+            duration_minutes        = (evidence.window_end - evidence.window_start) / 60,
+            candidate_ids           = [evidence.candidate_id],
+            candidate_count         = 1,
+            representative_title    = title,
+            top_titles              = [title] if title else [],
+            keywords                = list(evidence.keywords),
+            conversation_ids        = list(evidence.conversation_ids),
+            top_conversation_id     = evidence.top_conversation_id,
+            domains                 = list(evidence.domains),
+            communities             = list(evidence.communities),
+            total_item_count        = evidence.item_count,
+            peak_score              = evidence.event_score,
+            avg_score               = evidence.event_score,
+            peak_z_score            = evidence.z_score,
+            status                  = "active",
+            merge_trace             = [seed_trace],
+            anchor_conversation_ids = anchor_ids,
         )
 
     # ------------------------------------------------------------------
     # Event update
     # ------------------------------------------------------------------
 
-    def _merge(self, event: TrackedEvent, evidence: EventEvidence) -> None:
+    def _merge(
+        self,
+        event:     TrackedEvent,
+        evidence:  EventEvidence,
+        score:     float,
+        breakdown: dict,
+    ) -> None:
         new_avg = (
             event.avg_score * event.candidate_count + evidence.event_score
         ) / (event.candidate_count + 1)
@@ -190,6 +211,35 @@ class EventConsolidator:
             event.top_titles.append(evidence.top_conversation_title)
             if len(event.top_titles) > 5:
                 event.top_titles = event.top_titles[:5]
+
+        # Promote top_conversation_id to anchor only when the merge is topically justified.
+        # A top_conv_match alone is not enough — the ID is already in anchors in that case.
+        _kw_ov  = breakdown.get("keyword_overlap", 0.0) or 0.0
+        _dom_ov = breakdown.get("domain_overlap",  0.0) or 0.0
+        _tid    = evidence.top_conversation_id
+        if (
+            _tid
+            and _tid not in event.anchor_conversation_ids
+            and len(event.anchor_conversation_ids) < 10
+        ):
+            if evidence.channel == "general":
+                if _kw_ov >= 0.20:
+                    event.anchor_conversation_ids.append(_tid)
+            else:
+                if _kw_ov >= 0.15 or _dom_ov >= 0.30:
+                    event.anchor_conversation_ids.append(_tid)
+
+        event.merge_trace.append({
+            "candidate_id":           evidence.candidate_id,
+            "candidate_time":         evidence.window_end,
+            "merge_score":            score,
+            "merge_reason":           breakdown.get("merge_reason"),
+            "top_conversation_match": breakdown.get("top_conversation_match"),
+            "conversation_overlap":   breakdown.get("conversation_overlap"),
+            "keyword_overlap":        breakdown.get("keyword_overlap"),
+            "domain_overlap":         breakdown.get("domain_overlap"),
+            "was_seed_candidate":     False,
+        })
 
     # ------------------------------------------------------------------
     # Candidate loading

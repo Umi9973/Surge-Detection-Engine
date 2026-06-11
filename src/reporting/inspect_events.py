@@ -15,6 +15,7 @@ Options:
     --duration-kind  KIND filter by duration_kind
     --active-only         show only status=active events
     --summary             print aggregate diagnostics instead of individual blocks
+    --audit               print full candidate timeline + merge reasons per event
 """
 from __future__ import annotations
 
@@ -23,7 +24,9 @@ import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+import pyarrow.parquet as pq
 
 from ..events.models import TrackedEvent
 from ..events.store import EventStore
@@ -151,6 +154,72 @@ def _print_summary(events: List[TrackedEvent], days: int) -> None:
     print(f"\n{div}")
 
 
+def _build_candidate_index(candidates_dir: Path) -> Dict[str, dict]:
+    """Load all candidate Parquet files into a dict keyed by candidate_id."""
+    index: Dict[str, dict] = {}
+    for path in sorted(candidates_dir.glob("**/*.parquet")):
+        try:
+            table = pq.read_table(str(path))
+            for i in range(table.num_rows):
+                row = {c: table.column(c)[i].as_py() for c in table.schema.names}
+                index[row["candidate_id"]] = row
+        except Exception as exc:
+            print(f"[audit] skipping {path.name}: {exc}", file=sys.stderr)
+    return index
+
+
+def _print_audit(events: List[TrackedEvent], candidates_dir: Path) -> None:
+    print("Building candidate index...", file=sys.stderr)
+    cand_index = _build_candidate_index(candidates_dir)
+    print(f"Indexed {len(cand_index)} candidates.\n", file=sys.stderr)
+
+    div = "─" * 76
+    for ev in events:
+        dur_h, dur_m = divmod(int(ev.duration_minutes), 60)
+        dur_str = f"{dur_h}h {dur_m}m" if dur_h else f"{dur_m}m"
+        print(div)
+        print(f"EVENT  {ev.primary_channel:<10}  {ev.duration_kind:<11}  "
+              f"cands={ev.candidate_count}  dur={dur_str}  score={ev.peak_score:.3f}")
+        print(f"  \"{ev.representative_title}\"")
+        print(f"  kw: {', '.join(ev.keywords[:8])}")
+        print()
+
+        for trace in ev.merge_trace:
+            cid  = trace["candidate_id"]
+            cand = cand_index.get(cid)
+            t    = _fmt_ts(trace["candidate_time"])
+
+            if trace.get("was_seed_candidate"):
+                role = "SEED "
+                reason_str = ""
+            else:
+                role = "MERGE"
+                s    = trace.get("merge_score") or 0.0
+                r    = trace.get("merge_reason") or "?"
+                co   = trace.get("conversation_overlap") or 0.0
+                ko   = trace.get("keyword_overlap") or 0.0
+                do_  = trace.get("domain_overlap") or 0.0
+                tcm  = "✓" if trace.get("top_conversation_match") else "✗"
+                reason_str = (
+                    f"  score={s:.3f}  reason={r:<14}"
+                    f"  top_conv={tcm}  conv={co:.2f}  kw={ko:.2f}  dom={do_:.2f}"
+                )
+
+            if cand:
+                title  = (cand.get("top_story_title") or "")[:55]
+                cs     = cand.get("event_score", 0.0)
+                ckw    = ", ".join((cand.get("keywords") or [])[:5])
+                cdom   = ", ".join((cand.get("top_domains") or [])[:3])
+                print(f"  [{role}] {t}  s={cs:.3f}  \"{title}\"")
+                print(f"          kw={ckw}")
+                print(f"          dom={cdom}{reason_str}")
+            else:
+                print(f"  [{role}] {t}  [candidate not found]{reason_str}")
+        print()
+
+    print(div)
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -168,6 +237,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--duration-kind", dest="duration_kind")
     parser.add_argument("--active-only",   action="store_true", dest="active_only")
     parser.add_argument("--summary",       action="store_true")
+    parser.add_argument("--audit",         action="store_true",
+                        help="print full candidate timeline + merge reasons per event")
     args = parser.parse_args(argv)
 
     store  = EventStore(_EVENTS_DIR)
@@ -193,6 +264,11 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if args.summary:
         _print_summary(events, args.days)
+        return
+
+    if args.audit:
+        candidates_dir = _ROOT / "data" / "event_candidates"
+        _print_audit(events, candidates_dir)
         return
 
     if args.sort == "score":

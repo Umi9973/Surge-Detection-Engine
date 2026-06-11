@@ -54,3 +54,8 @@ class TrackedEvent:
     event_kind:           str = "event_candidate"
     duration_kind:        str = "unknown"  # isolated | flash | developing | sustained
     status:               str = "active"   # active | closed
+    merge_trace:          List[dict] = field(default_factory=list)
+    # Small, stable set of story IDs used as matching identity.
+    # Populated from seed + merges with meaningful topical evidence.
+    # conversation_ids is full provenance (audit only), not a strong match anchor.
+    anchor_conversation_ids: List[int] = field(default_factory=list)
