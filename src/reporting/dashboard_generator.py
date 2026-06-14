@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html as _html
+import json
 import os
 import sqlite3
 import sys
@@ -20,6 +22,8 @@ BUCKET_NAME     = os.environ.get("GCS_BUCKET",  "hn-surge-dashboard-01")
 GCP_PROJECT     = os.environ.get("GCS_PROJECT", "project-8299dfb6-57e5-4dcf-bc0")
 REFRESH_SEC     = 300
 LIVE_DB         = str(_ROOT / "data" / "dbs" / "anomalies_hn_live.db")
+HEALTH_PATH     = _ROOT / "data" / "health.json"
+_STALE_SECONDS  = 15 * 60  # 3× the 5-min polling interval
 
 # 4×2 trellis — (channel, row, col)
 CHANNEL_GRID = [
@@ -104,7 +108,49 @@ def build_dashboard(state: RedisStateManager, conn: sqlite3.Connection) -> str:
     fig.update_xaxes(showgrid=False, zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor="#2a2a4a", zeroline=False)
 
-    return fig.to_html(full_html=True, include_plotlyjs="cdn")
+    page = fig.to_html(full_html=True, include_plotlyjs="cdn")
+    banner = _build_status_banner(HEALTH_PATH)
+    return page.replace("<body>", f"<body>{banner}", 1)
+
+
+# ---------------------------------------------------------------------------
+# Health banner
+# ---------------------------------------------------------------------------
+
+def _build_status_banner(health_path: Path) -> str:
+    try:
+        data = json.loads(health_path.read_text(encoding="utf-8"))
+    except Exception:
+        return _banner_html("⚠️ No health data found — ingestion may not be running.", "#ffcc00")
+
+    heartbeat_str = data.get("last_heartbeat_utc", "")
+    try:
+        heartbeat_dt = datetime.fromisoformat(heartbeat_str.replace("Z", "+00:00"))
+        age_sec = (datetime.now(timezone.utc) - heartbeat_dt).total_seconds()
+    except Exception:
+        age_sec = float("inf")
+
+    if age_sec > _STALE_SECONDS:
+        mins     = int(age_sec // 60)
+        last_err = _html.escape(data.get("last_error_message") or "unknown")
+        return _banner_html(
+            f"⚠️ HN ingestion stale — no heartbeat for {mins}m. Last error: {last_err}",
+            "#ff4444",
+        )
+    if data.get("status") != "ok":
+        msg = _html.escape(data.get("last_error_message") or "")
+        return _banner_html(f"⚠️ HN ingestion warning: {msg}", "#ffcc00")
+
+    last_fetch = _html.escape(heartbeat_str)
+    return _banner_html(f"✓ HN ingestion OK — last fetch {last_fetch}", "#22bb55")
+
+
+def _banner_html(msg: str, color: str) -> str:
+    return (
+        f'<div style="background:{color};color:#fff;padding:10px 16px;'
+        f'font-family:sans-serif;font-size:14px;position:sticky;top:0;z-index:999">'
+        f"{msg}</div>"
+    )
 
 
 # ---------------------------------------------------------------------------

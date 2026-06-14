@@ -278,7 +278,8 @@ def live_hn(use_real_redis: bool = True) -> None:
     state    = RedisStateManager(r)
     tripwire = SlidingWindowTripwire(state, TARGET_CHANNELS)
     gate     = AlertGate()
-    ingestor = HackerNewsIngestor(poll_interval=5.0)
+    _health_path = _ROOT / "data" / "health.json"
+    ingestor = HackerNewsIngestor(poll_interval=5.0, health_path=_health_path)
     filter_  = SubredditFilter(TARGET_CHANNELS)
     dispatcher = WebhookDispatcher()   # reads WEBHOOK_URL from env; no-op if unset
 

@@ -5,14 +5,17 @@ import csv
 import html as html_mod
 import queue
 import re
+import sys
 import threading
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import aiohttp
 
 from .base import DataIngestor
+from ..monitoring.health import write_health
 
 # ---------------------------------------------------------------------------
 # Topic router
@@ -334,11 +337,17 @@ class HackerNewsIngestor(DataIngestor, _HNItemProcessor):
 
     BASE_URL = "https://hacker-news.firebaseio.com/v0"
 
-    def __init__(self, poll_interval: float = 5.0, concurrency: int = 20) -> None:
+    def __init__(
+        self,
+        poll_interval: float = 5.0,
+        concurrency: int = 20,
+        health_path: Optional[Path] = None,
+    ) -> None:
         _HNItemProcessor.__init__(self)
         self._poll_interval = poll_interval
         self._concurrency   = concurrency
         self._last_id: int  = 0
+        self._health_path   = health_path
 
     def stream(self) -> Iterator[Dict]:
         q: queue.Queue = queue.Queue(maxsize=1000)
@@ -354,18 +363,59 @@ class HackerNewsIngestor(DataIngestor, _HNItemProcessor):
         async with aiohttp.ClientSession() as session:
             await self._bootstrap(session)
             while True:
-                items = await self._fetch_new(session)
-                for d in self._process(items):
-                    q.put(d)
-                await asyncio.sleep(self._poll_interval)
+                try:
+                    items = await self._fetch_new(session)
+                    for d in self._process(items):
+                        q.put(d)
+                    write_health(self._health_path, status="ok")
+                    await asyncio.sleep(self._poll_interval)
+                except Exception as exc:
+                    write_health(
+                        self._health_path,
+                        status="warning",
+                        error_type=type(exc).__name__,
+                        error_msg=str(exc),
+                    )
+                    print(f"[hn] fetch loop error: {type(exc).__name__}: {exc}", file=sys.stderr)
+                    await asyncio.sleep(30)
 
     async def _bootstrap(self, session: aiohttp.ClientSession) -> None:
-        async with session.get(f"{self.BASE_URL}/maxitem.json") as resp:
-            self._last_id = int(await resp.json())
+        """Seed _last_id from Firebase. Retries indefinitely with capped backoff."""
+        delay   = 5
+        attempt = 0
+        while True:
+            try:
+                async with session.get(
+                    f"{self.BASE_URL}/maxitem.json",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    self._last_id = int((await resp.text()).strip())
+                    return
+            except Exception as exc:
+                attempt += 1
+                msg = f"bootstrap attempt {attempt} failed: {type(exc).__name__}: {exc}"
+                print(f"[hn] {msg}", file=sys.stderr)
+                write_health(
+                    self._health_path,
+                    status="warning",
+                    error_type=type(exc).__name__,
+                    error_msg=msg,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60)
 
     async def _fetch_new(self, session: aiohttp.ClientSession) -> List[Dict]:
-        async with session.get(f"{self.BASE_URL}/maxitem.json") as resp:
-            max_id = int(await resp.json())
+        async with session.get(
+            f"{self.BASE_URL}/maxitem.json",
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status != 200:
+                body = (await resp.text())[:200]
+                raise RuntimeError(f"maxitem status={resp.status}: {body}")
+            try:
+                max_id = int((await resp.text()).strip())
+            except (ValueError, TypeError) as exc:
+                raise RuntimeError(f"maxitem parse error: {exc}") from exc
 
         if max_id <= self._last_id:
             return []
@@ -384,8 +434,9 @@ class HackerNewsIngestor(DataIngestor, _HNItemProcessor):
         async with sem:
             try:
                 async with session.get(f"{self.BASE_URL}/item/{item_id}.json") as resp:
-                    return await resp.json()
-            except Exception:
+                    return await resp.json(content_type=None)
+            except Exception as exc:
+                print(f"[hn] item {item_id} fetch error: {type(exc).__name__}", file=sys.stderr)
                 return None
 
 
