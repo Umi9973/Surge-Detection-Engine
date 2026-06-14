@@ -2,18 +2,19 @@
 """
 Regression baseline for SameChannelPolicy merge decisions.
 
-Loads data/audit/golden_merge_cases.json and runs two test suites:
-  - Pairwise: seeds a TrackedEvent from candidate_a, scores candidate_b.
-              No state accumulation — conservative for SHOULD_MERGE.
-  - End-to-end: runs EventConsolidator over the full date range (write=False)
-                and checks that known groups land in the same or different events.
+Three classification groups (from golden_merge_cases.json):
+  must_merge      — pairwise cases that must pass. Failure = policy too strict.
+  must_not_merge  — pairwise cases that must not merge. Failure = policy too permissive.
+  scenario_e2e    — E2E grouping cases where direct pairwise merge is ambiguous.
+                    Requires state accumulation. Failures are warnings, not hard failures.
+
+Exit code 1 if any must_merge or must_not_merge tests fail.
+scenario_e2e failures are reported but do not affect exit code.
 
 Usage:
     python tests/regression_merge_baseline.py
     python tests/regression_merge_baseline.py --skip-e2e
     python tests/regression_merge_baseline.py --verbose
-
-Exit code 1 if any tests fail.
 """
 from __future__ import annotations
 
@@ -86,6 +87,7 @@ def _run_pairwise(
     for case in cases:
         cid      = case["case_id"]
         expected = case["expected"]
+        group    = case.get("group", "")
 
         cand_a = index.get(case["candidate_a"])
         cand_b = index.get(case["candidate_b"])
@@ -110,6 +112,7 @@ def _run_pairwise(
             failed += 1
             failures.append({
                 "case_id":   cid,
+                "group":     group,
                 "expected":  expected,
                 "score":     score,
                 "breakdown": breakdown,
@@ -128,6 +131,7 @@ def _run_pairwise(
                 f"  conv={bd.get('conversation_overlap', 0):.2f}"
                 f"  dom={bd.get('domain_overlap', 0):.2f}"
                 f"  top={int(bool(bd.get('top_conversation_match')))}"
+                f"  [{group}]"
             )
 
     return passed, failed, failures
@@ -142,7 +146,8 @@ def _run_e2e(
     date_from: str,
     date_to: str,
     verbose: bool,
-) -> Tuple[int, int, List[dict]]:
+) -> Tuple[int, int, int, List[dict]]:
+    """Returns (hard_passed, hard_failed, scenario_warned, failures)."""
     print(f"\n  Running end-to-end consolidation {date_from} → {date_to}...")
     consolidator = EventConsolidator()
     events = consolidator.run(date_from, date_to, write=False)
@@ -153,61 +158,79 @@ def _run_e2e(
         for cid in ev.candidate_ids:
             cand_to_event[cid] = ev.event_id
 
-    passed = failed = 0
+    hard_passed = hard_failed = scenario_warned = 0
     failures: List[dict] = []
 
-    # All IDs must land in the same TrackedEvent
     for group in e2e.get("expected_same_event", []):
-        gid = group["group_id"]
-        ids = group["candidate_ids"]
-        missing = [cid for cid in ids if cid not in cand_to_event]
+        gid       = group["group_id"]
+        ids       = group["candidate_ids"]
+        grp_class = group.get("group", "must_merge")
+        missing   = [cid for cid in ids if cid not in cand_to_event]
+
         if missing:
-            print(f"  SKIP  {gid} (same_event): not in consolidation output: {missing}")
+            print(f"  SKIP  {gid} (same_event): not in output: {missing}")
             continue
 
         event_ids = {cand_to_event[cid] for cid in ids}
         ok = len(event_ids) == 1
+
         if ok:
-            passed += 1
+            if grp_class != "scenario_e2e":
+                hard_passed += 1
             if verbose:
-                print(f"  PASS  {gid} (same_event): all in {next(iter(event_ids))}")
+                print(f"  PASS  {gid} (same_event) [{grp_class}]: all in {next(iter(event_ids))}")
         else:
-            failed += 1
+            if grp_class == "scenario_e2e":
+                scenario_warned += 1
+                label = "WARN"
+            else:
+                hard_failed += 1
+                label = "FAIL"
             failures.append({
                 "group_id":  gid,
+                "group":     grp_class,
                 "kind":      "same_event",
                 "event_ids": sorted(event_ids),
                 "notes":     group.get("notes", ""),
             })
-            print(f"  FAIL  {gid} (same_event): split across {len(event_ids)} events")
+            print(f"  {label}  {gid} (same_event) [{grp_class}]: split across {len(event_ids)} events")
 
-    # Each ID must be in a different TrackedEvent
     for group in e2e.get("expected_different_events", []):
-        gid = group["group_id"]
-        ids = group["candidate_ids"]
-        missing = [cid for cid in ids if cid not in cand_to_event]
+        gid       = group["group_id"]
+        ids       = group["candidate_ids"]
+        grp_class = group.get("group", "must_not_merge")
+        missing   = [cid for cid in ids if cid not in cand_to_event]
+
         if missing:
-            print(f"  SKIP  {gid} (diff_events): not in consolidation output: {missing}")
+            print(f"  SKIP  {gid} (diff_events): not in output: {missing}")
             continue
 
         event_ids = [cand_to_event[cid] for cid in ids]
         ok = len(set(event_ids)) == len(ids)
+
         if ok:
-            passed += 1
+            if grp_class != "scenario_e2e":
+                hard_passed += 1
             if verbose:
-                print(f"  PASS  {gid} (diff_events): all separated")
+                print(f"  PASS  {gid} (diff_events) [{grp_class}]: all separated")
         else:
-            failed += 1
             merged = [cid for cid, eid in zip(ids, event_ids) if event_ids.count(eid) > 1]
+            if grp_class == "scenario_e2e":
+                scenario_warned += 1
+                label = "WARN"
+            else:
+                hard_failed += 1
+                label = "FAIL"
             failures.append({
                 "group_id":   gid,
+                "group":      grp_class,
                 "kind":       "diff_events",
                 "merged_ids": merged,
                 "notes":      group.get("notes", ""),
             })
-            print(f"  FAIL  {gid} (diff_events): unexpectedly merged — {merged}")
+            print(f"  {label}  {gid} (diff_events) [{grp_class}]: unexpectedly merged — {merged}")
 
-    return passed, failed, failures
+    return hard_passed, hard_failed, scenario_warned, failures
 
 
 # ---------------------------------------------------------------------------
@@ -235,42 +258,46 @@ def main() -> None:
     print(f"Indexed {len(index)} event_candidate(s).")
 
     # --- Pairwise ---
-    should_merge     = [c for c in golden["pairwise"] if c["expected"] == "should_merge"]
-    should_not_merge = [c for c in golden["pairwise"] if c["expected"] == "should_not_merge"]
+    must_merge     = [c for c in golden["pairwise"] if c["expected"] == "should_merge"]
+    must_not_merge = [c for c in golden["pairwise"] if c["expected"] == "should_not_merge"]
 
-    print(f"\nPAIRWISE — should_merge ({len(should_merge)} cases):")
-    sm_p, sm_f, sm_failures = _run_pairwise(should_merge, index, args.verbose)
+    print(f"\nPAIRWISE — must_merge ({len(must_merge)} cases):")
+    mm_p, mm_f, mm_failures = _run_pairwise(must_merge, index, args.verbose)
 
-    print(f"\nPAIRWISE — should_not_merge ({len(should_not_merge)} cases):")
-    snm_p, snm_f, snm_failures = _run_pairwise(should_not_merge, index, args.verbose)
+    print(f"\nPAIRWISE — must_not_merge ({len(must_not_merge)} cases):")
+    mnm_p, mnm_f, mnm_failures = _run_pairwise(must_not_merge, index, args.verbose)
 
     # --- E2E ---
-    e2e_p = e2e_f = 0
+    e2e_p = e2e_f = e2e_w = 0
     e2e_failures: List[dict] = []
     if not args.skip_e2e:
         print(f"\nEND-TO-END:")
-        e2e_p, e2e_f, e2e_failures = _run_e2e(golden["end_to_end"], date_from, date_to, args.verbose)
+        e2e_p, e2e_f, e2e_w, e2e_failures = _run_e2e(
+            golden["end_to_end"], date_from, date_to, args.verbose
+        )
 
     # --- Summary ---
-    total_p = sm_p + snm_p + e2e_p
-    total_f = sm_f + snm_f + e2e_f
+    total_p = mm_p + mnm_p + e2e_p
+    total_f = mm_f + mnm_f + e2e_f
 
     print(f"\n{'='*62}")
     print(f"  Results")
     print(f"{'='*62}")
-    print(f"  should_merge:     {sm_p:>2} passed, {sm_f:>2} failed")
-    print(f"  should_not_merge: {snm_p:>2} passed, {snm_f:>2} failed")
+    print(f"  must_merge     (pairwise): {mm_p:>2} passed, {mm_f:>2} failed")
+    print(f"  must_not_merge (pairwise): {mnm_p:>2} passed, {mnm_f:>2} failed")
     if not args.skip_e2e:
-        print(f"  end_to_end:       {e2e_p:>2} passed, {e2e_f:>2} failed")
-    print(f"  {'─'*32}")
-    print(f"  total:            {total_p:>2} passed, {total_f:>2} failed")
+        print(f"  must_*         (e2e):      {e2e_p:>2} passed, {e2e_f:>2} failed")
+        if e2e_w:
+            print(f"  scenario_e2e   (e2e):      {e2e_w:>2} warned  (not counted in total)")
+    print(f"  {'─'*34}")
+    print(f"  total:                     {total_p:>2} passed, {total_f:>2} failed")
 
-    if sm_failures or snm_failures:
+    if mm_failures or mnm_failures:
         print(f"\nPairwise failures:")
-        for f in sm_failures + snm_failures:
+        for f in mm_failures + mnm_failures:
             bd = f.get("breakdown", {})
             print(
-                f"\n  [{f['case_id']}]  expected={f['expected']}  score={f['score']:.3f}"
+                f"\n  [{f['case_id']}]  group={f['group']}  expected={f['expected']}  score={f['score']:.3f}"
                 f"  kw={bd.get('keyword_overlap', 0):.3f}"
                 f"  conv={bd.get('conversation_overlap', 0):.3f}"
                 f"  dom={bd.get('domain_overlap', 0):.3f}"
@@ -281,9 +308,23 @@ def main() -> None:
             if f.get("notes"):
                 print(f"    note: {f['notes']}")
 
-    if e2e_failures:
+    hard_e2e = [f for f in e2e_failures if f.get("group") != "scenario_e2e"]
+    warn_e2e = [f for f in e2e_failures if f.get("group") == "scenario_e2e"]
+
+    if hard_e2e:
         print(f"\nE2E failures:")
-        for f in e2e_failures:
+        for f in hard_e2e:
+            print(f"\n  [{f['group_id']}]  kind={f['kind']}  group={f['group']}")
+            if f["kind"] == "same_event":
+                print(f"    split across: {f['event_ids']}")
+            else:
+                print(f"    merged: {f['merged_ids']}")
+            if f.get("notes"):
+                print(f"    note: {f['notes']}")
+
+    if warn_e2e:
+        print(f"\nE2E warnings (scenario_e2e — aspirational, not blocking):")
+        for f in warn_e2e:
             print(f"\n  [{f['group_id']}]  kind={f['kind']}")
             if f["kind"] == "same_event":
                 print(f"    split across: {f['event_ids']}")

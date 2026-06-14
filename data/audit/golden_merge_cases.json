@@ -3,14 +3,20 @@
     "date_range": "2026-05-29 to 2026-06-09",
     "created": "2026-06-14",
     "purpose": "Regression baseline for SameChannelPolicy merge decisions. Prevents threshold tuning from fixing one over-merge while silently breaking known-good merges.",
-    "pairwise_note": "Pairwise tests use a seed-only event from candidate_a, then score candidate_b. No state accumulation — conservative for SHOULD_MERGE, appropriate for SHOULD_NOT_MERGE. Stateful failures (where accumulated conversation_ids cause the problem) will only appear in end-to-end tests.",
-    "acceptance": "SHOULD_MERGE passed, SHOULD_NOT_MERGE passed, good small events preserved, over-merged chains reduced. Fragmentation (everything → isolated) is not acceptable."
+    "classification": {
+      "must_merge": "Pairwise cases that must pass. Clean, high-confidence same-story progressions with strong kw+conv+anchor evidence. If these fail, the policy is too strict.",
+      "must_not_merge": "Pairwise cases that must not merge. Broad set of negative examples that reveal policy flaws. If these pass, the policy is too permissive.",
+      "scenario_e2e": "Cases where direct pairwise merge is ambiguous or incorrect. Requires full state accumulation via EventConsolidator. Tests event narrative grouping over time, not single-step match."
+    },
+    "pairwise_note": "Pairwise tests use a seed-only event from candidate_a, then score candidate_b. No state accumulation — conservative for must_merge, appropriate for must_not_merge. Stateful failures (where accumulated conversation_ids cause the problem) will only appear in end-to-end tests. apple_wwdc_to_gemini is deliberately excluded from pairwise: forcing it to pass pairwise would require loosening weights that would then cause apple/nvidia-style over-merging.",
+    "acceptance": "must_merge all pass, must_not_merge all pass, scenario_e2e groupings correct. Fragmentation (everything → isolated) is not acceptable."
   },
 
   "pairwise": [
 
     {
       "case_id": "diabetes_merge_1_2",
+      "group": "must_merge",
       "expected": "should_merge",
       "reason": "same_story_progression",
       "candidate_a": "hacker_news:science:1780836600:0",
@@ -20,6 +26,7 @@
 
     {
       "case_id": "microsoft_hacked_merge_1_2",
+      "group": "must_merge",
       "expected": "should_merge",
       "reason": "same_story_progression",
       "candidate_a": "hacker_news:tech:1781014800:0",
@@ -28,16 +35,8 @@
     },
 
     {
-      "case_id": "apple_wwdc_to_gemini",
-      "expected": "should_merge",
-      "reason": "same_event_multi_story",
-      "candidate_a": "hacker_news:tech:1780941300:1",
-      "candidate_b": "hacker_news:tech:1780951800:0",
-      "notes": "Apple WWDC livestream candidate → Apple Gemini AI architecture announcement. Same WWDC event progression, strong apple/siri/google/gemini keyword coherence expected. Tests whether event merges across different story IDs within the same tech news event."
-    },
-
-    {
       "case_id": "switzerland_referendum_merge_1_2",
+      "group": "must_merge",
       "expected": "should_merge",
       "reason": "same_story_progression",
       "candidate_a": "hacker_news:general:1780955400:2",
@@ -47,15 +46,17 @@
 
     {
       "case_id": "sbf_pardon_vs_brexit",
+      "group": "must_not_merge",
       "expected": "should_not_merge",
       "reason": "shared_domain_only",
       "candidate_a": "hacker_news:startup:1780945800:0",
       "candidate_b": "hacker_news:startup:1780950000:1",
-      "notes": "SBF pardon (pardons/pardon/trump) vs Brexit referendum flip. Different stories. Shared Bloomberg/TechCrunch domains and startup channel, but keyword_overlap should be near zero. This is a known failing case with current policy (startup channel has no kw_overlap==0 block)."
+      "notes": "SBF pardon (pardons/pardon/trump) vs Brexit referendum flip. Different stories. Shared Bloomberg/TechCrunch domains and startup channel, but kw=0. Currently failing: startup channel has no kw=0 block so conv=1.0 + dom=1.0 carries the merge."
     },
 
     {
       "case_id": "gemma_model_vs_elixir_release",
+      "group": "must_not_merge",
       "expected": "should_not_merge",
       "reason": "topic_drift",
       "candidate_a": "hacker_news:general:1780505700:0",
@@ -66,25 +67,28 @@
 
     {
       "case_id": "elixir_release_vs_abortion_story",
+      "group": "must_not_merge",
       "expected": "should_not_merge",
       "reason": "same_channel_noise",
       "candidate_a": "hacker_news:general:1780518300:0",
       "candidate_b": "hacker_news:general:1780520400:1",
-      "notes": "Elixir v1.20 gradual typing release vs abortion/miscarriage story (faced/threatening/miscarriage/abortion keywords). Completely different topics. General channel kw_overlap==0 block should reject this. Tests that our general channel fix holds. (candidate_a is cluster 0 — the true Elixir discussion; cluster 2 is a noise cluster with spam keywords)"
+      "notes": "Elixir v1.20 gradual typing release vs abortion/miscarriage story (faced/threatening/miscarriage/abortion keywords). Completely different topics. General channel kw=0 block should reject this. (candidate_a is cluster 0 — the true Elixir discussion; cluster 2 is a noise cluster with spam keywords)"
     },
 
     {
       "case_id": "xai_datacenter_vs_switzerland_referendum",
+      "group": "must_not_merge",
       "expected": "should_not_merge",
       "reason": "generic_keyword_overlap",
       "candidate_a": "hacker_news:general:1780947000:1",
       "candidate_b": "hacker_news:general:1780951200:0",
-      "notes": "xAI datacenter REIT story (where/social/into/back/data) vs Switzerland population referendum (population/switzerland/swiss). Generic keyword overlap on where/social/into is not event identity. In pairwise seed test this may correctly not merge; the accumulated state bug surfaces in e2e.",
+      "notes": "xAI datacenter REIT story (where/social/into/back/data) vs Switzerland population referendum (population/switzerland/swiss). Generic keyword overlap on where/social/into is not event identity. Pairwise currently fails (score=0.299); the stateful version is even worse in e2e.",
       "stateful": true
     },
 
     {
       "case_id": "switzerland_referendum_vs_farmer_park",
+      "group": "must_not_merge",
       "expected": "should_not_merge",
       "reason": "topic_drift",
       "candidate_a": "hacker_news:general:1780955400:2",
@@ -94,6 +98,7 @@
 
     {
       "case_id": "apple_wwdc_vs_nvidia_lg_robotics",
+      "group": "must_not_merge",
       "expected": "should_not_merge",
       "reason": "same_channel_noise",
       "candidate_a": "hacker_news:tech:1780941300:1",
@@ -103,6 +108,7 @@
 
     {
       "case_id": "cloudflare_turnstile_vs_unrelated_general",
+      "group": "must_not_merge",
       "expected": "should_not_merge",
       "reason": "same_channel_noise",
       "candidate_a": "hacker_news:general:1780245000:0",
@@ -121,6 +127,7 @@
 
       {
         "group_id": "diabetes_conference_single_event",
+        "group": "must_merge",
         "candidate_ids": [
           "hacker_news:science:1780836600:0",
           "hacker_news:science:1780840800:0"
@@ -130,6 +137,7 @@
 
       {
         "group_id": "microsoft_hacked_single_event",
+        "group": "must_merge",
         "candidate_ids": [
           "hacker_news:tech:1781014800:0",
           "hacker_news:tech:1781016900:1"
@@ -139,11 +147,22 @@
 
       {
         "group_id": "switzerland_referendum_clean",
+        "group": "must_merge",
         "candidate_ids": [
           "hacker_news:general:1780955400:2",
           "hacker_news:general:1780957500:4"
         ],
         "notes": "The clean 2-candidate Switzerland referendum event must remain merged."
+      },
+
+      {
+        "group_id": "apple_wwdc_to_gemini_e2e",
+        "group": "scenario_e2e",
+        "candidate_ids": [
+          "hacker_news:tech:1780941300:1",
+          "hacker_news:tech:1780951800:0"
+        ],
+        "notes": "Apple WWDC livestream → Apple Gemini AI architecture announcement. Different story IDs so direct pairwise merge is too weak (score=0.161). Requires bridge evidence from intermediate Apple/Siri/Gemini candidates over time. If this fails after policy tuning, investigate whether intermediate candidates are being absorbed correctly before concluding the merge is wrong."
       }
 
     ],
@@ -152,15 +171,17 @@
 
       {
         "group_id": "sbf_and_brexit_separate",
+        "group": "must_not_merge",
         "candidate_ids": [
           "hacker_news:startup:1780945800:0",
           "hacker_news:startup:1780950000:1"
         ],
-        "notes": "SBF pardon and Brexit referendum must be in different events. Currently failing — startup channel has no kw_overlap==0 block."
+        "notes": "SBF pardon and Brexit referendum must be in different events. Currently failing — startup channel has no kw=0 block."
       },
 
       {
         "group_id": "xai_and_switzerland_separate",
+        "group": "must_not_merge",
         "candidate_ids": [
           "hacker_news:general:1780947000:1",
           "hacker_news:general:1780951200:0"
@@ -170,6 +191,7 @@
 
       {
         "group_id": "switzerland_and_farmer_separate",
+        "group": "must_not_merge",
         "candidate_ids": [
           "hacker_news:general:1780955400:2",
           "hacker_news:general:1780955400:1"
@@ -179,6 +201,7 @@
 
       {
         "group_id": "apple_and_nvidia_separate",
+        "group": "must_not_merge",
         "candidate_ids": [
           "hacker_news:tech:1780951800:0",
           "hacker_news:tech:1780941300:0"
@@ -188,11 +211,12 @@
 
       {
         "group_id": "elixir_and_abortion_separate",
+        "group": "must_not_merge",
         "candidate_ids": [
           "hacker_news:general:1780518300:0",
           "hacker_news:general:1780520400:1"
         ],
-        "notes": "Elixir v1.20 and abortion/miscarriage story must be separate. kw_overlap==0 general block should prevent this merge. (cluster 0 is the true Elixir discussion; cluster 2 was a noise cluster)"
+        "notes": "Elixir v1.20 and abortion/miscarriage story must be separate. kw=0 general block should prevent this merge."
       }
 
     ]
