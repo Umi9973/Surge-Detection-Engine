@@ -1,11 +1,16 @@
 # Data directory — raw dumps and generated databases
-data/
+# Use data/* (not data/) so git descends into subdirectories for exceptions below
+data/*
 
 # Data file types (belt-and-suspenders)
 *.zst
 *.sqlite
 *.db
 *.json
+
+# Test fixtures — checked-in reference data, not generated output
+!data/audit/
+!data/audit/*.json
 
 # Environment
 .env

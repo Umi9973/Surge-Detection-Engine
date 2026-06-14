@@ -1,0 +1,200 @@
+{
+  "meta": {
+    "date_range": "2026-05-29 to 2026-06-09",
+    "created": "2026-06-14",
+    "purpose": "Regression baseline for SameChannelPolicy merge decisions. Prevents threshold tuning from fixing one over-merge while silently breaking known-good merges.",
+    "pairwise_note": "Pairwise tests use a seed-only event from candidate_a, then score candidate_b. No state accumulation — conservative for SHOULD_MERGE, appropriate for SHOULD_NOT_MERGE. Stateful failures (where accumulated conversation_ids cause the problem) will only appear in end-to-end tests.",
+    "acceptance": "SHOULD_MERGE passed, SHOULD_NOT_MERGE passed, good small events preserved, over-merged chains reduced. Fragmentation (everything → isolated) is not acceptable."
+  },
+
+  "pairwise": [
+
+    {
+      "case_id": "diabetes_merge_1_2",
+      "expected": "should_merge",
+      "reason": "same_story_progression",
+      "candidate_a": "hacker_news:science:1780836600:0",
+      "candidate_b": "hacker_news:science:1780840800:0",
+      "notes": "Same story, same science channel. Two consecutive 35-min windows of the same diabetes/journals story. Should merge on top_conv_match + strong kw/domain overlap."
+    },
+
+    {
+      "case_id": "microsoft_hacked_merge_1_2",
+      "expected": "should_merge",
+      "reason": "same_story_progression",
+      "candidate_a": "hacker_news:tech:1781014800:0",
+      "candidate_b": "hacker_news:tech:1781016900:1",
+      "notes": "Microsoft open-source tools hacked / password theft. Two tech-channel candidates 35 min apart. High kw (github/security/access) and domain (techcrunch/github/macrumors) overlap."
+    },
+
+    {
+      "case_id": "apple_wwdc_to_gemini",
+      "expected": "should_merge",
+      "reason": "same_event_multi_story",
+      "candidate_a": "hacker_news:tech:1780941300:1",
+      "candidate_b": "hacker_news:tech:1780951800:0",
+      "notes": "Apple WWDC livestream candidate → Apple Gemini AI architecture announcement. Same WWDC event progression, strong apple/siri/google/gemini keyword coherence expected. Tests whether event merges across different story IDs within the same tech news event."
+    },
+
+    {
+      "case_id": "switzerland_referendum_merge_1_2",
+      "expected": "should_merge",
+      "reason": "same_story_progression",
+      "candidate_a": "hacker_news:general:1780955400:2",
+      "candidate_b": "hacker_news:general:1780957500:4",
+      "notes": "Switzerland population referendum. Two general-channel candidates with consistent switzerland/population/swiss/admin.ch keywords and domains. Both from the clean 2-candidate event."
+    },
+
+    {
+      "case_id": "sbf_pardon_vs_brexit",
+      "expected": "should_not_merge",
+      "reason": "shared_domain_only",
+      "candidate_a": "hacker_news:startup:1780945800:0",
+      "candidate_b": "hacker_news:startup:1780950000:1",
+      "notes": "SBF pardon (pardons/pardon/trump) vs Brexit referendum flip. Different stories. Shared Bloomberg/TechCrunch domains and startup channel, but keyword_overlap should be near zero. This is a known failing case with current policy (startup channel has no kw_overlap==0 block)."
+    },
+
+    {
+      "case_id": "gemma_model_vs_elixir_release",
+      "expected": "should_not_merge",
+      "reason": "topic_drift",
+      "candidate_a": "hacker_news:general:1780505700:0",
+      "candidate_b": "hacker_news:general:1780518300:2",
+      "notes": "DaVinci Resolve / Gemma 4 12B window (features/quantum/models/google keywords) vs Elixir v1.20 gradual typing release. Different technical topics. Candidate_a id is inferred from audit (verify if SKIP).",
+      "verify": true
+    },
+
+    {
+      "case_id": "elixir_release_vs_abortion_story",
+      "expected": "should_not_merge",
+      "reason": "same_channel_noise",
+      "candidate_a": "hacker_news:general:1780518300:0",
+      "candidate_b": "hacker_news:general:1780520400:1",
+      "notes": "Elixir v1.20 gradual typing release vs abortion/miscarriage story (faced/threatening/miscarriage/abortion keywords). Completely different topics. General channel kw_overlap==0 block should reject this. Tests that our general channel fix holds. (candidate_a is cluster 0 — the true Elixir discussion; cluster 2 is a noise cluster with spam keywords)"
+    },
+
+    {
+      "case_id": "xai_datacenter_vs_switzerland_referendum",
+      "expected": "should_not_merge",
+      "reason": "generic_keyword_overlap",
+      "candidate_a": "hacker_news:general:1780947000:1",
+      "candidate_b": "hacker_news:general:1780951200:0",
+      "notes": "xAI datacenter REIT story (where/social/into/back/data) vs Switzerland population referendum (population/switzerland/swiss). Generic keyword overlap on where/social/into is not event identity. In pairwise seed test this may correctly not merge; the accumulated state bug surfaces in e2e.",
+      "stateful": true
+    },
+
+    {
+      "case_id": "switzerland_referendum_vs_farmer_park",
+      "expected": "should_not_merge",
+      "reason": "topic_drift",
+      "candidate_a": "hacker_news:general:1780955400:2",
+      "candidate_b": "hacker_news:general:1780955400:1",
+      "notes": "Switzerland population cap referendum vs farmer donated land / city building data center. Different civic stories. From same window (same parquet file, different cluster). Domain or conversation overlap should not be enough."
+    },
+
+    {
+      "case_id": "apple_wwdc_vs_nvidia_lg_robotics",
+      "expected": "should_not_merge",
+      "reason": "same_channel_noise",
+      "candidate_a": "hacker_news:tech:1780941300:1",
+      "candidate_b": "hacker_news:tech:1780941300:0",
+      "notes": "Apple WWDC Livestream (apple/siri/live/zig/macos) vs Nvidia partners with LG robotics to build humanoid robots. Same tech window and shared domains (apple.com/github.com), but completely different event. Tests that domain overlap alone does not carry a tech-channel merge."
+    },
+
+    {
+      "case_id": "cloudflare_turnstile_vs_unrelated_general",
+      "expected": "should_not_merge",
+      "reason": "same_channel_noise",
+      "candidate_a": "hacker_news:general:1780245000:0",
+      "candidate_b": "hacker_news:general:1780247100:1",
+      "notes": "Cloudflare Turnstile WebGL fingerprinting vs a non-Cloudflare general candidate from the adjacent window. Tests that a strong Cloudflare event does not absorb unrelated general candidates due to window proximity. Candidate_b id is approximate (cluster 1 in next window); verify if SKIP.",
+      "verify": true
+    }
+
+  ],
+
+  "end_to_end": {
+    "date_from": "2026-05-29",
+    "date_to": "2026-06-09",
+
+    "expected_same_event": [
+
+      {
+        "group_id": "diabetes_conference_single_event",
+        "candidate_ids": [
+          "hacker_news:science:1780836600:0",
+          "hacker_news:science:1780840800:0"
+        ],
+        "notes": "Both diabetes candidates must land in the same TrackedEvent. A single coherent 2-candidate science event."
+      },
+
+      {
+        "group_id": "microsoft_hacked_single_event",
+        "candidate_ids": [
+          "hacker_news:tech:1781014800:0",
+          "hacker_news:tech:1781016900:1"
+        ],
+        "notes": "Both Microsoft-hacked candidates must land in the same TrackedEvent."
+      },
+
+      {
+        "group_id": "switzerland_referendum_clean",
+        "candidate_ids": [
+          "hacker_news:general:1780955400:2",
+          "hacker_news:general:1780957500:4"
+        ],
+        "notes": "The clean 2-candidate Switzerland referendum event must remain merged."
+      }
+
+    ],
+
+    "expected_different_events": [
+
+      {
+        "group_id": "sbf_and_brexit_separate",
+        "candidate_ids": [
+          "hacker_news:startup:1780945800:0",
+          "hacker_news:startup:1780950000:1"
+        ],
+        "notes": "SBF pardon and Brexit referendum must be in different events. Currently failing — startup channel has no kw_overlap==0 block."
+      },
+
+      {
+        "group_id": "xai_and_switzerland_separate",
+        "candidate_ids": [
+          "hacker_news:general:1780947000:1",
+          "hacker_news:general:1780951200:0"
+        ],
+        "notes": "xAI datacenter REIT and Switzerland referendum must not share an event. Currently failing due to conv_overlap accumulation (stateful bug)."
+      },
+
+      {
+        "group_id": "switzerland_and_farmer_separate",
+        "candidate_ids": [
+          "hacker_news:general:1780955400:2",
+          "hacker_news:general:1780955400:1"
+        ],
+        "notes": "Switzerland referendum and farmer/park land story must be separate events. Same window, different clusters."
+      },
+
+      {
+        "group_id": "apple_and_nvidia_separate",
+        "candidate_ids": [
+          "hacker_news:tech:1780951800:0",
+          "hacker_news:tech:1780941300:0"
+        ],
+        "notes": "Apple Gemini AI announcement and Nvidia/LG robotics candidate must be separate events."
+      },
+
+      {
+        "group_id": "elixir_and_abortion_separate",
+        "candidate_ids": [
+          "hacker_news:general:1780518300:0",
+          "hacker_news:general:1780520400:1"
+        ],
+        "notes": "Elixir v1.20 and abortion/miscarriage story must be separate. kw_overlap==0 general block should prevent this merge. (cluster 0 is the true Elixir discussion; cluster 2 was a noise cluster)"
+      }
+
+    ]
+  }
+}
