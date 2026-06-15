@@ -296,3 +296,39 @@ This document tracks significant architectural challenges, bugs, and bottlenecks
 * **Key Takeaway:** Stopword filters and token transformations must operate in the same space. Any transformation applied after the filter (stemming, lowercasing, normalization) creates a gap where transformed forms bypass the filter undetected. Always apply filters last, or pre-transform the filter vocabulary to match the token space it will be compared against.
 
 ---
+
+### [CLOSED] Issue #19: Event ID collision — multiple DBSCAN clusters in the same window sharing the same `top_conversation_id`
+
+* **Date Opened:** 2026-06-14
+* **Date Closed:** 2026-06-14
+* **Phase:** Phase 2 — EventConsolidator / Regression Baseline
+* **The Problem:** `EventConsolidator._new_event()` built event IDs as `{source}:{channel}:{window_start}:{top_conversation_id}`. On HN, every cluster in a given window reports the window's dominant story as its `top_story_id` — the most-commented story in that 35-minute window is returned by all DBSCAN clusters regardless of which story each cluster actually discussed. Two unrelated clusters in the same window (e.g., an Elixir release cluster and a noise cluster) therefore both generated the same event_id. The E2E regression test built a `cand_to_event: Dict[str, str]` keyed by event_id string: the second event overwrote the first in the dict, making the test report both candidates as "in the same event" even when they were in separate `TrackedEvent` objects.
+* **Root Cause:** `top_conversation_id` is a window-level signal, not a cluster-level identity signal. Using it as the primary event identifier assumes each cluster has a unique dominant story, which is not guaranteed. The test's reliance on event_id strings as grouping keys propagated the collision into false failure reports.
+* **The Resolution:**
+  1. `_new_event()` now always uses `f"ev:{evidence.candidate_id}"` as event_id. `candidate_id` is unique by construction (`{source}:{channel}:{window_end}:{cluster_id}`). The `ev:` prefix distinguishes event IDs from candidate IDs visually in logs and stored data.
+  2. E2E regression test switched from `cand_to_event[cid] = ev.event_id` (string) to `cand_to_ev[cid] = ev` (object reference). Grouping now uses `id(ev)` (Python object identity) — two TrackedEvent objects with the same event_id string are correctly treated as distinct events. `ev.event_id` is retained for display only.
+  3. Added a uniqueness assertion in the E2E test: if any two events share an event_id, a warning is printed to stderr. With the new `ev:candidate_id` scheme, no collisions occur.
+* **Key Takeaway:** A field that encodes the window's dominant item, not the cluster's own identity, is not a stable unique key for that cluster's event. Any identifier derived from shared environmental state (window-level, session-level) can collide across concurrent events. Use a key that is structurally unique at the granularity of the entity being identified — here, the seed candidate_id.
+
+---
+
+### [CLOSED] Issue #20: General channel policy — unreliable `top_match` signal and stateful drift in unanchored merges
+
+* **Date Opened:** 2026-06-14
+* **Date Closed:** 2026-06-14
+* **Phase:** Phase 2 — SameChannelPolicy / EventConsolidator
+* **The Problem (two linked bugs):**
+  1. **`kw=0` bypass via `top_match`:** The general channel gate was simplified to `if kw_overlap < 0.20 and not top_match: block`. This allowed `kw_overlap=0 AND top_match=True` to pass. Because HN's `top_story_id` reflects the window's dominant story and not the cluster's own topic, all clusters in the same window inherit the same `top_conversation_id`. A noise cluster and the true Elixir cluster from the same window both have `top_match=True` against each other's events — even when they discuss completely unrelated topics. An abortion/miscarriage cluster with `kw=0` relative to the Elixir event passed the gate via `top_match=True` and merged (score=0.286).
+  2. **Stateful drift in unanchored merges (chain drift):** An intermediate "bridge" candidate — a mixed HN front-page window that discusses both xAI and Switzerland at the same time — merged into the xAI event via `top_match=True` and accumulated that event's `conversation_ids` and `keywords`. Subsequent evaluation of the Switzerland candidate against this now-enlarged xAI event produced `kw_overlap=0.5`, `conv_overlap=0.49`, `dom_overlap=1.0`, score=0.272 — just above the 0.25 threshold — with no `top_match`. The pairwise xAI/Switzerland test correctly returned 0.222 (below threshold), but stateful accumulation created a merge in the end-to-end run. This is the same class of bug as Issue #5 (topic bleeding inside SUSTAINED chains) but in the HN event consolidation layer.
+* **Root Cause:**
+  1. `top_match` was used as a permissive override inside the general channel gate without accounting for the fact that it is a window-level artifact, not a cluster identity signal, in the general channel.
+  2. The general channel merge threshold (0.25) was designed for pairwise comparisons. In stateful E2E runs, the denominator for Jaccard conv_overlap shrinks as the event accumulates more candidates, making a 0.27 score attainable for candidates that would score 0.22 against a fresh seed.
+* **The Resolution:**
+  1. Restored unconditional `kw_overlap == 0.0 → block` for general channel (regardless of `top_match`). This prevents `top_match` from acting as a standalone pass signal in the channel where it is least reliable.
+  2. Split the remaining general gate into two modes:
+     * **Anchored** (`top_match=True`): `kw > 0` suffices; raw score decides. `top_match` is meaningful as a supporting signal here, just not sufficient alone.
+     * **Unanchored** (`top_match=False`): require `kw_overlap ≥ 0.30` AND (`dom_overlap ≥ 0.50` OR `conv_overlap ≥ 0.65`) AND `kw_score + conv_score + dom_score ≥ 0.35`. The 0.35 sub-threshold means keyword and domain evidence must be strong enough to clear the bar without conv_overlap carrying the merge — conv_overlap in general accumulates noise from concurrent front-page stories and is too unreliable as the primary signal for an unanchored merge.
+* **Result:** Regression baseline: 12/6 → 18/0 (all must_merge and must_not_merge pass). The two previously failing E2E cases (xAI/Switzerland stateful drift, elixir/abortion kw=0 bypass) now pass. One scenario_e2e WARN remains (Apple WWDC → Gemini bridge, aspirational — does not affect exit code).
+* **Key Takeaway:** In stateful systems, pairwise test results are necessary but not sufficient. A merge that is correctly blocked in isolation can become reachable through intermediate state accumulation. Per-channel gates must account for the noisiness of the available signals in that channel: in `general`, `top_match` is a window artifact, `conv_overlap` accumulates rapidly from front-page co-occurrence, and only keyword evidence is a reliable topic identity signal. Anchor-mode and unanchored-mode merges have fundamentally different reliability profiles and warrant different gates.
+
+---

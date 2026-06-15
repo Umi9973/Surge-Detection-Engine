@@ -153,10 +153,20 @@ def _run_e2e(
     events = consolidator.run(date_from, date_to, write=False)
     print(f"  Consolidator produced {len(events)} tracked event(s).")
 
-    cand_to_event: Dict[str, str] = {}
+    # Map candidate_id → TrackedEvent object (not event_id string).
+    # Object identity is correct: two events with the same event_id string are
+    # distinct events and must be treated as such.
+    from src.events.models import TrackedEvent as _TrackedEvent
+    cand_to_ev: Dict[str, _TrackedEvent] = {}
     for ev in events:
         for cid in ev.candidate_ids:
-            cand_to_event[cid] = ev.event_id
+            cand_to_ev[cid] = ev
+
+    # Uniqueness assertion — event_ids must be unique across the run.
+    all_ids = [ev.event_id for ev in events]
+    dupes   = {eid for eid in all_ids if all_ids.count(eid) > 1}
+    if dupes:
+        print(f"  WARN  Duplicate event_ids detected: {dupes}", file=sys.stderr)
 
     hard_passed = hard_failed = scenario_warned = 0
     failures: List[dict] = []
@@ -165,14 +175,16 @@ def _run_e2e(
         gid       = group["group_id"]
         ids       = group["candidate_ids"]
         grp_class = group.get("group", "must_merge")
-        missing   = [cid for cid in ids if cid not in cand_to_event]
+        missing   = [cid for cid in ids if cid not in cand_to_ev]
 
         if missing:
             print(f"  SKIP  {gid} (same_event): not in output: {missing}")
             continue
 
-        event_ids = {cand_to_event[cid] for cid in ids}
-        ok = len(event_ids) == 1
+        # Use object identity — same Python object means same TrackedEvent.
+        obj_ids   = {id(cand_to_ev[cid]) for cid in ids}
+        event_ids = {cand_to_ev[cid].event_id for cid in ids}
+        ok = len(obj_ids) == 1
 
         if ok:
             if grp_class != "scenario_e2e":
@@ -193,20 +205,22 @@ def _run_e2e(
                 "event_ids": sorted(event_ids),
                 "notes":     group.get("notes", ""),
             })
-            print(f"  {label}  {gid} (same_event) [{grp_class}]: split across {len(event_ids)} events")
+            print(f"  {label}  {gid} (same_event) [{grp_class}]: split across {len(obj_ids)} events")
 
     for group in e2e.get("expected_different_events", []):
         gid       = group["group_id"]
         ids       = group["candidate_ids"]
         grp_class = group.get("group", "must_not_merge")
-        missing   = [cid for cid in ids if cid not in cand_to_event]
+        missing   = [cid for cid in ids if cid not in cand_to_ev]
 
         if missing:
             print(f"  SKIP  {gid} (diff_events): not in output: {missing}")
             continue
 
-        event_ids = [cand_to_event[cid] for cid in ids]
-        ok = len(set(event_ids)) == len(ids)
+        # Use object identity for grouping; event_id only for display.
+        ev_obj_ids = [id(cand_to_ev[cid]) for cid in ids]
+        event_ids  = [cand_to_ev[cid].event_id for cid in ids]
+        ok = len(set(ev_obj_ids)) == len(ids)
 
         if ok:
             if grp_class != "scenario_e2e":
@@ -214,7 +228,7 @@ def _run_e2e(
             if verbose:
                 print(f"  PASS  {gid} (diff_events) [{grp_class}]: all separated")
         else:
-            merged = [cid for cid, eid in zip(ids, event_ids) if event_ids.count(eid) > 1]
+            merged = [cid for cid, oid in zip(ids, ev_obj_ids) if ev_obj_ids.count(oid) > 1]
             if grp_class == "scenario_e2e":
                 scenario_warned += 1
                 label = "WARN"

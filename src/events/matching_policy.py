@@ -9,6 +9,16 @@ if TYPE_CHECKING:
 
 _MAX_GAP_SECONDS = 90 * 60  # 90-minute time gap hard gate
 
+# English function words that slip through per-channel TF-IDF on small corpora.
+# Conservative — only words that are NEVER topical. Do not extend casually.
+_NOISE_KW = frozenset({
+    "into", "onto", "over", "also", "just", "even", "well", "here",
+    "only", "then", "when", "what", "where", "back", "too", "more",
+    "some", "such", "both", "very", "like", "said", "does", "will",
+    "would", "could", "have", "been", "were", "from", "with", "them",
+    "they", "this", "that",
+})
+
 
 class MatchingPolicy(ABC):
     """Decide whether one EventEvidence should merge into an existing TrackedEvent.
@@ -36,15 +46,22 @@ class SameChannelPolicy(MatchingPolicy):
     """V1 policy: same source, same channel, 90-minute gap gate.
 
     Scoring weights:
-      0.50 — top_conversation_id match (strongest signal)
-      0.30 — conversation set overlap (Szymkiewicz-Simpson)
-      0.15 — keyword overlap
-      0.05 — domain overlap
+      0.25 — top_conversation_id match (anchor set only)
+      0.30 — conversation set overlap (Jaccard: |A∩B|/|A∪B|)
+      0.15 — keyword overlap (Szymkiewicz-Simpson, after _NOISE_KW filtering)
+      0.05 — domain overlap (Szymkiewicz-Simpson)
 
-    General channel penalty: if keyword overlap is weak (< 0.3) and there is
-    no top-conversation match and no strong conversation overlap (>= 0.5),
-    the score is forced to 0.0 to prevent incoherent general candidates merging
-    on superficial similarity alone.
+    Metric note: conv_overlap uses Jaccard, not Simpson. Each candidate has a bounded
+    conv_id set from its own DBSCAN cluster, so there is no multi-cluster union bloat
+    (the concern that motivated Simpson for keyword overlap in Issue #3). Tiny candidate
+    pools (3-4 conv_ids) fully contained in a larger set gave Simpson=1.0 on unrelated
+    stories — Jaccard correctly down-weights this containment.
+
+    Global gate:  kw=0 AND no anchor → blocked. Conv/domain alone is not reliable
+                  because small pools give high overlap for unrelated stories.
+    General gate: kw=0 → always blocked (top_match unreliable as standalone signal).
+                  Unanchored (no top_match): require kw≥0.30 AND (dom≥0.50 OR conv≥0.65)
+                  AND kw+conv+dom score ≥ 0.35.  Anchored: kw>0 suffices.
     """
 
     @property
@@ -80,37 +97,50 @@ class SameChannelPolicy(MatchingPolicy):
         )
         top_score = 0.25 if top_match else 0.0
 
-        # Conversation overlap (Szymkiewicz-Simpson)
-        if ev_conv and evt_conv:
-            conv_overlap = len(ev_conv & evt_conv) / min(len(ev_conv), len(evt_conv))
-        else:
-            conv_overlap = 0.0
+        # Conversation overlap (Jaccard)
+        conv_union = ev_conv | evt_conv
+        conv_overlap = len(ev_conv & evt_conv) / len(conv_union) if conv_union else 0.0
         conv_score = 0.30 * conv_overlap
 
-        # Keyword overlap
-        if ev_kw and evt_kw:
-            kw_overlap = len(ev_kw & evt_kw) / min(len(ev_kw), len(evt_kw))
+        # Keyword overlap (Szymkiewicz-Simpson, noise-filtered)
+        ev_kw_f  = ev_kw  - _NOISE_KW
+        evt_kw_f = evt_kw - _NOISE_KW
+        if ev_kw_f and evt_kw_f:
+            kw_overlap = len(ev_kw_f & evt_kw_f) / min(len(ev_kw_f), len(evt_kw_f))
         else:
             kw_overlap = 0.0
         kw_score = 0.15 * kw_overlap
 
-        # Domain overlap
+        # Domain overlap (Szymkiewicz-Simpson)
         if ev_dom and evt_dom:
             dom_overlap = len(ev_dom & evt_dom) / min(len(ev_dom), len(evt_dom))
         else:
             dom_overlap = 0.0
         dom_score = 0.05 * dom_overlap
 
-        raw = top_score + conv_score + kw_score + dom_score
+        # Global gate: no keyword evidence and no anchor hit is never enough to merge.
+        if kw_overlap == 0.0 and not top_match:
+            return _zero
 
-        # General channel: require topical coherence, conversation overlap alone is not enough.
+        # General channel: two-mode gating.
+        # kw=0 is always blocked — top_story_id reflects the window's dominant story,
+        # not the cluster's topic, so top_match alone is not reliable here.
+        # Unanchored (no top_match): stricter gate to block stateful conv accumulation
+        # drift. The 0.35 sub-threshold means kw+domain must clear the bar without
+        # conv carrying the merge.
+        # Anchored (top_match=True): kw>0 suffices; final score decides.
         if evidence.channel == "general":
             if kw_overlap == 0.0:
                 return _zero
-            if kw_overlap < 0.20:
-                has_strong_support = top_match or conv_overlap >= 0.3 or dom_overlap >= 0.4
-                if not has_strong_support:
+            if not top_match:
+                if kw_overlap < 0.30:
                     return _zero
+                if dom_overlap < 0.50 and conv_overlap < 0.65:
+                    return _zero
+                if conv_score + kw_score + dom_score < 0.35:
+                    return _zero
+
+        raw = top_score + conv_score + kw_score + dom_score
 
         # Derive primary merge reason
         if top_match:

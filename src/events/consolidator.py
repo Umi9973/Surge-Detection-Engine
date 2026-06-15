@@ -120,14 +120,9 @@ class EventConsolidator:
     # ------------------------------------------------------------------
 
     def _new_event(self, evidence: EventEvidence) -> TrackedEvent:
-        if evidence.top_conversation_id != 0:
-            event_id = (
-                f"{evidence.source}:{evidence.channel}"
-                f":{evidence.window_start}:{evidence.top_conversation_id}"
-            )
-        else:
-            # candidate_id is unique by construction: {source}:{channel}:{window_end}:{cluster_id}
-            event_id = evidence.candidate_id
+        # ev: prefix distinguishes event IDs from candidate IDs visually.
+        # candidate_id is unique by construction so this is always collision-free.
+        event_id = f"ev:{evidence.candidate_id}"
 
         title = evidence.top_conversation_title or ""
         seed_trace = {
