@@ -1,7 +1,8 @@
 {
   "meta": {
-    "date_range": "2026-05-29 to 2026-06-09",
+    "date_range": "2026-05-29 to 2026-06-16",
     "created": "2026-06-14",
+    "updated": "2026-06-16",
     "purpose": "Regression baseline for SameChannelPolicy merge decisions. Prevents threshold tuning from fixing one over-merge while silently breaking known-good merges.",
     "classification": {
       "must_merge": "Pairwise cases that must pass. Clean, high-confidence same-story progressions with strong kw+conv+anchor evidence. If these fail, the policy is too strict.",
@@ -115,6 +116,56 @@
       "candidate_b": "hacker_news:general:1780247100:1",
       "notes": "Cloudflare Turnstile WebGL fingerprinting vs a non-Cloudflare general candidate from the adjacent window. Tests that a strong Cloudflare event does not absorb unrelated general candidates due to window proximity. Candidate_b id is approximate (cluster 1 in next window); verify if SKIP.",
       "verify": true
+    },
+
+    {
+      "case_id": "chrome_adblocker_merge_1_2",
+      "group": "must_merge",
+      "expected": "should_merge",
+      "reason": "same_story_progression",
+      "candidate_a": "hacker_news:tech:1781627700:1",
+      "candidate_b": "hacker_news:tech:1781629800:0",
+      "notes": "Google Chrome Manifest V3 / ad-blocker story. Two consecutive tech-channel windows (Jun 16). score=0.465, top_match=True, kw=0.25 (chrome/blockers/google/browser), conv=0.46, dom=0.80."
+    },
+
+    {
+      "case_id": "fable5_security_merge_1_2",
+      "group": "must_merge",
+      "expected": "should_merge",
+      "reason": "same_story_progression",
+      "candidate_a": "hacker_news:security:1781622600:1",
+      "candidate_b": "hacker_news:security:1781624700:3",
+      "notes": "Feds/Fable 5 Xbox AI security story. Two consecutive security-channel windows (Jun 16). score=0.536, top_match=True, kw=0.375 (security/vulnerability/bug/fix), conv=0.60, dom=1.0."
+    },
+
+    {
+      "case_id": "no_everyone_ai_merge_1_2",
+      "group": "must_merge",
+      "expected": "should_merge",
+      "reason": "same_story_progression",
+      "candidate_a": "hacker_news:ai:1781456400:0",
+      "candidate_b": "hacker_news:ai:1781458500:0",
+      "notes": "AI adoption skepticism story ('No, everyone is not using AI'). Two consecutive ai-channel windows (Jun 14). score=0.611, top_match=True, kw=0.571 (llm/models/llms/agent/code), conv=0.75, dom=1.0."
+    },
+
+    {
+      "case_id": "chrome_vs_apple_nausea_tech",
+      "group": "must_not_merge",
+      "expected": "should_not_merge",
+      "reason": "different_story_same_window",
+      "candidate_a": "hacker_news:tech:1781627700:1",
+      "candidate_b": "hacker_news:tech:1781629800:3",
+      "notes": "Chrome ad-blockers story vs Apple anti-nausea dots story. Same tech channel on Jun 16 but completely different topics. kw=0 (origin/ublock/brave/chrome vs feature/tools/git/records). Score=0. Regression guard for Step 3."
+    },
+
+    {
+      "case_id": "spacex_cursor_vs_no_everyone_ai",
+      "group": "must_not_merge",
+      "expected": "should_not_merge",
+      "reason": "topic_drift",
+      "candidate_a": "hacker_news:ai:1781629200:0",
+      "candidate_b": "hacker_news:ai:1781456400:0",
+      "notes": "SpaceX/Cursor $60B acquisition (Jun 16) vs AI adoption skepticism story (Jun 14). Same ai channel but 2 days apart and different topics. score=0.029, kw=0.125 (models/llms overlap is incidental). Time gap > 90 min; tests that ai channel does not over-merge topic-adjacent but story-distinct events."
     }
 
   ],
@@ -162,7 +213,46 @@
           "hacker_news:tech:1780941300:1",
           "hacker_news:tech:1780951800:0"
         ],
-        "notes": "Apple WWDC livestream → Apple Gemini AI architecture announcement. Different story IDs so direct pairwise merge is too weak (score=0.161). Requires bridge evidence from intermediate Apple/Siri/Gemini candidates over time. If this fails after policy tuning, investigate whether intermediate candidates are being absorbed correctly before concluding the merge is wrong."
+        "notes": "Apple WWDC livestream → Apple Gemini AI architecture announcement. Different story IDs so direct pairwise merge is too weak (score=0.125). With evolved event, score=0.220 — just below 0.25. Anchor 48448106 (WWDC livestream) appears in Gemini cluster's conv_ids — reverse anchor match would fix. Requires Step 3 policy extension."
+      },
+
+      {
+        "group_id": "chrome_adblocker_single_event",
+        "group": "must_merge",
+        "candidate_ids": [
+          "hacker_news:tech:1781627700:1",
+          "hacker_news:tech:1781629800:0",
+          "hacker_news:tech:1781631900:4",
+          "hacker_news:tech:1781634000:4",
+          "hacker_news:tech:1781636100:0"
+        ],
+        "notes": "All 5 Chrome Manifest V3 / ad-blocker candidates (Jun 16) must land in the same TrackedEvent."
+      },
+
+      {
+        "group_id": "fable5_single_event",
+        "group": "must_merge",
+        "candidate_ids": [
+          "hacker_news:security:1781622600:1",
+          "hacker_news:security:1781624700:3",
+          "hacker_news:security:1781626800:0"
+        ],
+        "notes": "All 3 Fable 5 / Xbox AI security candidates (Jun 16) must land in the same TrackedEvent."
+      },
+
+      {
+        "group_id": "no_everyone_ai_single_event",
+        "group": "must_merge",
+        "candidate_ids": [
+          "hacker_news:ai:1781456400:0",
+          "hacker_news:ai:1781458500:0",
+          "hacker_news:ai:1781458500:2",
+          "hacker_news:ai:1781460600:0",
+          "hacker_news:ai:1781462700:1",
+          "hacker_news:ai:1781462700:2",
+          "hacker_news:ai:1781462700:5"
+        ],
+        "notes": "All 7 'No, everyone is not using AI' candidates (Jun 14) must land in the same TrackedEvent."
       }
 
     ],
@@ -217,6 +307,26 @@
           "hacker_news:general:1780520400:1"
         ],
         "notes": "Elixir v1.20 and abortion/miscarriage story must be separate. kw=0 general block should prevent this merge."
+      },
+
+      {
+        "group_id": "chrome_and_apple_nausea_separate",
+        "group": "must_not_merge",
+        "candidate_ids": [
+          "hacker_news:tech:1781627700:1",
+          "hacker_news:tech:1781629800:3"
+        ],
+        "notes": "Chrome ad-blockers and Apple anti-nausea dots must be in different events. Same tech channel Jun 16 but completely different stories. Regression guard for Step 3 threshold changes."
+      },
+
+      {
+        "group_id": "spacex_cursor_and_no_everyone_separate",
+        "group": "must_not_merge",
+        "candidate_ids": [
+          "hacker_news:ai:1781629200:0",
+          "hacker_news:ai:1781456400:0"
+        ],
+        "notes": "SpaceX/Cursor acquisition (Jun 16) and AI adoption skepticism story (Jun 14) must be in different events. Same ai channel but 2 days apart and topic-distinct. Regression guard for ai channel."
       }
 
     ]
