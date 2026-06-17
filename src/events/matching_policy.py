@@ -47,6 +47,8 @@ class SameChannelPolicy(MatchingPolicy):
 
     Scoring weights:
       0.25 — top_conversation_id match (anchor set only)
+      0.10 — reverse anchor match: event anchor appears in evidence.conversation_ids
+             (only when top_match is False; does not bypass any kw=0 gate)
       0.30 — conversation set overlap (Jaccard: |A∩B|/|A∪B|)
       0.15 — keyword overlap (Szymkiewicz-Simpson, after _NOISE_KW filtering)
       0.05 — domain overlap (Szymkiewicz-Simpson)
@@ -62,6 +64,8 @@ class SameChannelPolicy(MatchingPolicy):
     General gate: kw=0 → always blocked (top_match unreliable as standalone signal).
                   Unanchored (no top_match): require kw≥0.30 AND (dom≥0.50 OR conv≥0.65)
                   AND kw+conv+dom score ≥ 0.35.  Anchored: kw>0 suffices.
+    Reverse anchor: does not bypass any gate. Contributes only when kw>0 passes the
+                  applicable gate(s) and top_match is False.
     """
 
     @property
@@ -96,6 +100,13 @@ class SameChannelPolicy(MatchingPolicy):
             and evidence.top_conversation_id in set(event.anchor_conversation_ids)
         )
         top_score = 0.25 if top_match else 0.0
+
+        # Reverse anchor match: event's anchor story appears in evidence's conversation set.
+        # Weaker than direct top_match (0.10 vs 0.25). Does not bypass any kw=0 gate —
+        # only contributes after gates pass and only when top_match is False.
+        _anchors = set(event.anchor_conversation_ids)
+        reverse_anchor_match = bool(_anchors & ev_conv) if _anchors else False
+        rev_anchor_score = 0.10 if (reverse_anchor_match and not top_match) else 0.0
 
         # Conversation overlap (Jaccard)
         conv_union = ev_conv | evt_conv
@@ -140,11 +151,13 @@ class SameChannelPolicy(MatchingPolicy):
                 if conv_score + kw_score + dom_score < 0.35:
                     return _zero
 
-        raw = top_score + conv_score + kw_score + dom_score
+        raw = top_score + conv_score + kw_score + dom_score + rev_anchor_score
 
         # Derive primary merge reason
         if top_match:
             reason = "top_conv_match"
+        elif reverse_anchor_match:
+            reason = "reverse_anchor_match"
         elif conv_overlap >= 0.3:
             reason = "conv_overlap"
         elif kw_overlap > 0 and dom_overlap > 0:
@@ -154,6 +167,7 @@ class SameChannelPolicy(MatchingPolicy):
 
         breakdown = {
             "top_conversation_match": top_match,
+            "reverse_anchor_match":   reverse_anchor_match,
             "conversation_overlap":   round(conv_overlap, 4),
             "keyword_overlap":        round(kw_overlap, 4),
             "domain_overlap":         round(dom_overlap, 4),

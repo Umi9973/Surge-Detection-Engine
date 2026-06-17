@@ -312,6 +312,28 @@ This document tracks significant architectural challenges, bugs, and bottlenecks
 
 ---
 
+### [CLOSED] Issue #21: Apple WWDC / Gemini split — one-directional anchor check misses same-story cross-cluster merges
+
+* **Date Opened:** 2026-06-17
+* **Date Closed:** 2026-06-17
+* **Phase:** Phase 2 — SameChannelPolicy / EventConsolidator
+* **The Problem:** Apple's WWDC 2026 keynote generated two concurrent DBSCAN clusters in the tech channel: a livestream discussion cluster (`1780941300:1`, kw: apple/siri/live/macos/wwdc) seeded an event, and a Gemini integration announcement cluster (`1780951800:0`, kw: google/apple/gemini/siri/models) was processed shortly after. The two clusters discuss the same real-world event (Apple's WWDC keynote) from different angles, but the policy failed to merge them. Pairwise score was 0.125; even against the evolved 4-candidate WWDC event the score was 0.220 — just below the 0.25 threshold. The Apple WWDC story remained split across two TrackedEvents.
+* **Root Cause:** The `top_match` check is one-directional: it asks whether `evidence.top_conversation_id` (the Gemini article, 48450142) is in `event.anchor_conversation_ids` (seeded with the WWDC livestream post, 48448106). These are different stories — so `top_match = False`. However, the WWDC anchor story (48448106) *did* appear inside the Gemini cluster's `conversation_ids` — HN users discussing Gemini were also commenting in the WWDC thread. This reverse relationship (event's anchor appearing in evidence's conv set) is semantically equivalent to `top_match` but was invisible to the policy.
+* **The Resolution:** Added a **reverse anchor match** to `SameChannelPolicy.score()`:
+  ```python
+  _anchors = set(event.anchor_conversation_ids)
+  reverse_anchor_match = bool(_anchors & ev_conv) if _anchors else False
+  rev_anchor_score = 0.10 if (reverse_anchor_match and not top_match) else 0.0
+  ```
+  Score contribution is 0.10 (vs 0.25 for direct `top_match`) — weaker because the signal is less specific (the anchor appears *among* the evidence's conversations, not as its *dominant* story). Two hard constraints preserved:
+  1. Does not bypass any `kw=0` gate — reverse anchor only contributes after keyword gates pass.
+  2. Zero contribution when `top_match=True` — avoids double-counting.
+  For general channel, the existing `kw ≥ 0.30` unanchored gate means meaningful keyword overlap is always required before reverse anchor can contribute.
+* **Result:** With the evolved WWDC event (4 candidates merged, kw/conv/dom accumulated): score 0.220 → 0.320. The Gemini cluster merges, producing 66 tracked events (vs 67 before). Regression baseline: 28/0, 0 warnings (previously 1 scenario_e2e WARN). All must_not_merge cases still separate (SBF/Brexit, Apple/Nvidia, xAI/Switzerland all score 0.0 — kw=0 gates block before reverse anchor is reached).
+* **Key Takeaway:** Anchor-based identity checks should be bidirectional. A cluster that strongly discusses a story (placing it in `conversation_ids`) is topically related to events anchored on that story, even if it's not the cluster's *own* dominant story. The asymmetry between "top story" and "discussed stories" is a real signal gap — the fix is a weaker-scored reverse check rather than lowering the merge threshold globally.
+
+---
+
 ### [CLOSED] Issue #20: General channel policy — unreliable `top_match` signal and stateful drift in unanchored merges
 
 * **Date Opened:** 2026-06-14
