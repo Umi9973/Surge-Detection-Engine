@@ -5,13 +5,12 @@ from typing import List, Optional
 from .classifier import classify
 from .models import EventCandidate
 
-# Lowercase substrings that identify recurring HN structural threads.
-# These are not spontaneous events — force to topic_surge so they never
-# promote to event_candidate regardless of unique_story_count.
+# Lowercase substrings that identify recurring HN structural megathreads.
+# These are not spontaneous events — classify as recurring_thread (never promotes to event_candidate).
 _RECURRING_THREAD_MARKERS = frozenset({
     "who is hiring",
     "who wants to be hired",
-    "ask hn: who",
+    "what are you working on",
 })
 
 
@@ -63,7 +62,7 @@ class CandidateBuilder:
     ) -> Optional[EventCandidate]:
         title = (cluster.get("top_story_title") or "").lower()
         if any(m in title for m in _RECURRING_THREAD_MARKERS):
-            kind, event_score = "topic_surge", 0.0
+            kind, event_score = "recurring_thread", 0.0
         else:
             kind, event_score = classify(cluster, z_score, channel=channel)
         if kind == "unknown":

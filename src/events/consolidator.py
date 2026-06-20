@@ -22,7 +22,7 @@ import pyarrow.parquet as pq
 
 from .evidence import EventEvidence
 from .matching_policy import MatchingPolicy, SameChannelPolicy
-from .models import EventCandidate, TrackedEvent
+from .models import EventCandidate, TrackedEvent, make_display_keywords
 from .store import EventStore
 
 _ROOT            = Path(__file__).resolve().parent.parent.parent
@@ -151,6 +151,7 @@ class EventConsolidator:
             representative_title    = title,
             top_titles              = [title] if title else [],
             keywords                = list(evidence.keywords),
+            display_keywords        = make_display_keywords(evidence.keywords),
             conversation_ids        = list(evidence.conversation_ids),
             top_conversation_id     = evidence.top_conversation_id,
             domains                 = list(evidence.domains),
@@ -201,6 +202,7 @@ class EventConsolidator:
         # Extend lists, deduplicated, capped
         _extend_capped(event.conversation_ids, evidence.conversation_ids, cap=50)
         _extend_capped(event.keywords,         evidence.keywords,         cap=15)
+        _extend_capped(event.display_keywords, make_display_keywords(evidence.keywords), cap=15)
         _extend_capped(event.domains,          evidence.domains,          cap=10)
         if evidence.top_conversation_title and evidence.top_conversation_title not in event.top_titles:
             event.top_titles.append(evidence.top_conversation_title)

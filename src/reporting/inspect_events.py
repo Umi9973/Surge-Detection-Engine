@@ -16,10 +16,12 @@ Options:
     --active-only         show only status=active events
     --summary             print aggregate diagnostics instead of individual blocks
     --audit               print full candidate timeline + merge reasons per event
+    --output  PATH        write report to file instead of stdout
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -68,7 +70,7 @@ def _print_event(ev: TrackedEvent) -> None:
     dur_str  = f"{dur_h}h {dur_m}m" if dur_h else f"{dur_m}m"
     channels = ", ".join(ev.channels)
     sources  = ", ".join(ev.sources)
-    kws      = ", ".join(ev.keywords[:10]) or "—"
+    kws      = ", ".join(ev.display_keywords[:10]) or "—"
     domains  = ", ".join(ev.domains[:5]) or "—"
     titles   = ev.top_titles[:3]
 
@@ -134,7 +136,7 @@ def _print_summary(events: List[TrackedEvent], days: int) -> None:
     # Top keywords across all events
     kw_counter: Counter = Counter()
     for e in events:
-        for kw in e.keywords:
+        for kw in e.display_keywords:
             kw_counter[kw] += 1
     print(f"\n  Top keywords across all events")
     for kw, n in kw_counter.most_common(12):
@@ -181,7 +183,7 @@ def _print_audit(events: List[TrackedEvent], candidates_dir: Path) -> None:
         print(f"EVENT  {ev.primary_channel:<10}  {ev.duration_kind:<11}  "
               f"cands={ev.candidate_count}  dur={dur_str}  score={ev.peak_score:.3f}")
         print(f"  \"{ev.representative_title}\"")
-        print(f"  kw: {', '.join(ev.keywords[:8])}")
+        print(f"  kw: {', '.join(ev.display_keywords[:8])}")
         print()
 
         for trace in ev.merge_trace:
@@ -239,8 +241,28 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--summary",       action="store_true")
     parser.add_argument("--audit",         action="store_true",
                         help="print full candidate timeline + merge reasons per event")
+    parser.add_argument("--output",        metavar="PATH",
+                        help="write report to file instead of stdout")
     args = parser.parse_args(argv)
 
+    if args.output:
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_file = open(out_path, "w", encoding="utf-8")
+        ctx: contextlib.AbstractContextManager = contextlib.redirect_stdout(out_file)
+    else:
+        out_file = None
+        ctx = contextlib.nullcontext()
+
+    with ctx:
+        _run(args)
+
+    if out_file:
+        out_file.close()
+        print(f"Report written → {Path(args.output).resolve()}", file=sys.stderr)
+
+
+def _run(args: argparse.Namespace) -> None:
     store  = EventStore(_EVENTS_DIR)
     events = store.read_all(days=args.days)
 

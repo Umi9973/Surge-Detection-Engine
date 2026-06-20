@@ -8,7 +8,8 @@ Options:
     --date  YYYY-MM-DD | YYYY-MM  filter by date prefix
     --days  N                      last N days by window_end (default 7; ignored if --date set)
     --channel  CHANNEL             filter by channel name
-    --kind  event_candidate|viral_post|topic_surge
+    --kind  event_candidate|viral_post|topic_surge|recurring_thread
+    --include-recurring            include recurring_thread candidates (hidden by default)
     --min-score  FLOAT             minimum event_score
     --limit  N                     max rows to print (default 50)
     --sort  score|time             sort order (default: score)
@@ -30,11 +31,12 @@ _ROOT           = Path(__file__).resolve().parent.parent.parent
 _CANDIDATES_DIR = _ROOT / "data" / "event_candidates"
 
 _KIND_LABEL = {
-    "event_candidate": "[EVENT  ]",
-    "viral_post":      "[VIRAL  ]",
-    "topic_surge":     "[SURGE  ]",
+    "event_candidate":  "[EVENT  ]",
+    "viral_post":       "[VIRAL  ]",
+    "topic_surge":      "[SURGE  ]",
+    "recurring_thread": "[RECUR  ]",
 }
-_KIND_ORDER = {"event_candidate": 0, "viral_post": 1, "topic_surge": 2}
+_KIND_ORDER = {"event_candidate": 0, "viral_post": 1, "topic_surge": 2, "recurring_thread": 3}
 
 
 def _collect_files(date_filter: Optional[str], days: int) -> List[Path]:
@@ -79,7 +81,10 @@ def _apply_filters(
     channel: Optional[str],
     kind: Optional[str],
     min_score: float,
+    include_recurring: bool = False,
 ) -> List[dict]:
+    if not include_recurring and kind != "recurring_thread":
+        rows = [r for r in rows if r.get("kind") != "recurring_thread"]
     if channel:
         rows = [r for r in rows if r.get("channel") == channel]
     if kind:
@@ -125,9 +130,10 @@ def _print_summary(rows: List[dict], days: int) -> None:
         print("No candidates.")
         return
 
-    events  = [r for r in rows if r.get("kind") == "event_candidate"]
-    virals  = [r for r in rows if r.get("kind") == "viral_post"]
-    surges  = [r for r in rows if r.get("kind") == "topic_surge"]
+    events    = [r for r in rows if r.get("kind") == "event_candidate"]
+    virals    = [r for r in rows if r.get("kind") == "viral_post"]
+    surges    = [r for r in rows if r.get("kind") == "topic_surge"]
+    recurring = [r for r in rows if r.get("kind") == "recurring_thread"]
 
     div = "─" * 72
     print(div)
@@ -136,9 +142,11 @@ def _print_summary(rows: List[dict], days: int) -> None:
 
     # --- Kind breakdown ---
     print(f"\n  Kind breakdown")
-    print(f"    event_candidate : {len(events):>4}  ({100*len(events)//total:>2}%)")
-    print(f"    viral_post      : {len(virals):>4}  ({100*len(virals)//total:>2}%)")
-    print(f"    topic_surge     : {len(surges):>4}  ({100*len(surges)//total:>2}%)")
+    print(f"    event_candidate  : {len(events):>4}  ({100*len(events)//total:>2}%)")
+    print(f"    viral_post       : {len(virals):>4}  ({100*len(virals)//total:>2}%)")
+    print(f"    topic_surge      : {len(surges):>4}  ({100*len(surges)//total:>2}%)")
+    if recurring:
+        print(f"    recurring_thread : {len(recurring):>4}  ({100*len(recurring)//total:>2}%)")
 
     # --- Channel breakdown for EVENT candidates ---
     print(f"\n  EVENT candidates by channel")
@@ -215,7 +223,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--days",      type=int, default=7,
                         help="last N days by window_end (default 7; ignored when --date set)")
     parser.add_argument("--channel",   help="filter by channel (ai, tech, security, …)")
-    parser.add_argument("--kind",      choices=["event_candidate", "viral_post", "topic_surge"],
+    parser.add_argument("--kind",      choices=["event_candidate", "viral_post", "topic_surge", "recurring_thread"],
                         help="filter by kind")
     parser.add_argument("--min-score", type=float, default=0.0, dest="min_score",
                         metavar="FLOAT", help="minimum event_score (0.0–1.0)")
@@ -225,6 +233,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                         help="sort by score desc (default) or time desc")
     parser.add_argument("--summary",   action="store_true",
                         help="print quality diagnostics instead of individual blocks")
+    parser.add_argument("--include-recurring", action="store_true", dest="include_recurring",
+                        help="include recurring_thread candidates (hidden by default)")
     args = parser.parse_args(argv)
 
     files = _collect_files(args.date, args.days)
@@ -233,7 +243,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         return
 
     rows = _load_rows(files)
-    rows = _apply_filters(rows, args.channel, args.kind, args.min_score)
+    rows = _apply_filters(rows, args.channel, args.kind, args.min_score, args.include_recurring)
 
     if not rows:
         print("No candidates match the given filters.")
