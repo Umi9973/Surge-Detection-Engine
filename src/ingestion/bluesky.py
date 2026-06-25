@@ -99,8 +99,10 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
         ("nintendo", 3), ("patreon", 3),
         ("gaming", 2), ("streaming", 2), ("anime", 2), ("fan fiction", 2),
         ("cosplay", 2), ("creator economy", 2), ("influencer", 2),
+        ("new album", 2), ("music video", 2), ("music festival", 2),
         ("game", 1), ("movie", 1), ("music", 1), ("film", 1), ("show", 1),
-        ("art", 1), ("book", 1), ("entertainment", 1),
+        ("art", 1), ("book", 1), ("entertainment", 1), ("song", 1), ("album", 1),
+        ("artist", 1), ("band", 1), ("trailer", 1), ("concert", 1), ("manga", 1),
     ],
     "social_movements": [
         ("lgbtq", 3), ("blm", 3), ("metoo", 3), ("aclu", 3),
@@ -138,6 +140,9 @@ _DOMAIN_BOOSTS: Dict[str, Tuple[str, float]] = {
     "github.com":               ("ai_tech",              2),
     "techcrunch.com":           ("ai_tech",              2),
     "arstechnica.com":          ("ai_tech",              2),
+    "youtu.be":                 ("culture_creators",     2),
+    "youtube.com":              ("culture_creators",     2),
+    "open.spotify.com":         ("culture_creators",     2),
     "ign.com":                  ("culture_creators",     3),
     "variety.com":              ("culture_creators",     2),
     "rollingstone.com":         ("culture_creators",     2),
@@ -156,6 +161,22 @@ _PRIORITY: List[str] = [
 # hack → hacked/hacking, breach → breached, exploit → exploiting, etc.
 _PREFIX_ROOTS: frozenset = frozenset({"hack", "breach", "exploit", "leak", "protest"})
 
+# Hashtag keyword scoring multiplier — hashtags are intentional signals,
+# slightly higher weight than incidental body text matches.
+_HASHTAG_WEIGHT_MULT = 1.5
+
+# Splits CamelCase hashtags into space-separated words before keyword matching.
+# e.g. MusicChallenge → Music Challenge, AINews → AI News
+_CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+# Regex to extract bare URLs from body text (fallback when no embed external link).
+# Catches https?:// URLs and common bare short-domain patterns (youtu.be, etc.).
+_BODY_URL_RE = re.compile(
+    r'https?://[^\s<>"\')]+|'
+    r'(?<!\w)(?:youtu\.be|bit\.ly|t\.co|tinyurl\.com|open\.spotify\.com)/\S+',
+    re.IGNORECASE,
+)
+
 
 def _build_pattern(kw: str) -> re.Pattern:
     escaped = re.escape(kw)
@@ -165,16 +186,24 @@ def _build_pattern(kw: str) -> re.Pattern:
 
 
 def _extract_domain(url: str) -> str:
+    if "://" not in url:
+        url = "https://" + url
     host = urlparse(url).netloc.lower()
     return host[4:] if host.startswith("www.") else host
 
 
 class BlueskyTopicRouter:
     """
-    Classify a Bluesky post body (+ optional external URL) into an Option B channel.
+    Classify a Bluesky post body (+ optional external URL + hashtags) into an
+    Option B channel.
 
-    Same scoring engine as HNTopicRouter: weighted keyword sum + domain boost,
-    priority tie-breaking. Returns 'general' when no channel scores above zero.
+    Scoring has three layers:
+      1. Keyword scan on body text (weighted sum, word-boundary regex)
+      2. Hashtag scan — same patterns, scores multiplied by _HASHTAG_WEIGHT_MULT
+         (hashtags are intentional signals, higher confidence than incidental text)
+      3. Domain boost on external URL (from embed or body text fallback)
+
+    Returns 'general' when no channel scores above zero.
     """
 
     def __init__(self) -> None:
@@ -183,14 +212,17 @@ class BlueskyTopicRouter:
             for ch, entries in _TOPIC_CHANNELS.items()
         }
 
-    def classify(self, text: str, url: Optional[str] = None) -> str:
-        return self.classify_with_audit(text, url)["channel"]
+    def classify(self, text: str, url: Optional[str] = None,
+                 hashtags: Optional[List[str]] = None) -> str:
+        return self.classify_with_audit(text, url, hashtags)["channel"]
 
-    def classify_with_audit(self, text: str, url: Optional[str] = None) -> Dict:
+    def classify_with_audit(self, text: str, url: Optional[str] = None,
+                            hashtags: Optional[List[str]] = None) -> Dict:
         """Return full routing decision including scores, matched keywords, domain boost."""
         channel_scores:   Dict[str, float]     = {}
         channel_keywords: Dict[str, List[str]] = {}
 
+        # Pass 1 — body text
         for ch, pat_kw_weights in self._patterns.items():
             matched, total = [], 0.0
             for pat, kw, weight in pat_kw_weights:
@@ -198,9 +230,25 @@ class BlueskyTopicRouter:
                     total  += weight
                     matched.append(kw)
             if total > 0:
-                channel_scores[ch]   = total
-                channel_keywords[ch] = matched
+                channel_scores[ch]   = channel_scores.get(ch, 0) + total
+                channel_keywords[ch] = channel_keywords.get(ch, []) + matched
 
+        # Pass 2 — hashtags (CamelCase split then joined, weighted x1.5)
+        # Split e.g. MusicChallenge → Music Challenge so \bmusic\b matches.
+        if hashtags:
+            hashtag_text = " ".join(_CAMEL_SPLIT_RE.sub(" ", tag) for tag in hashtags)
+            for ch, pat_kw_weights in self._patterns.items():
+                matched, total = [], 0.0
+                for pat, kw, weight in pat_kw_weights:
+                    if pat.search(hashtag_text):
+                        boosted = weight * _HASHTAG_WEIGHT_MULT
+                        total  += boosted
+                        matched.append(kw)
+                if total > 0:
+                    channel_scores[ch]    = channel_scores.get(ch, 0) + total
+                    channel_keywords[ch]  = channel_keywords.get(ch, []) + matched
+
+        # Pass 3 — domain boost from external URL
         domain_boost_str = ""
         if url:
             domain = _extract_domain(url)
@@ -229,11 +277,11 @@ class BlueskyTopicRouter:
 
         return {
             "channel":           winner,
-            "top_score":         best_score,
+            "top_score":         round(best_score, 3),
             "second_channel":    second_ch,
-            "second_score":      second_score,
-            "score_margin":      round(best_score - second_score, 2),
-            "matched_keywords":  channel_keywords.get(winner, []),
+            "second_score":      round(second_score, 3),
+            "score_margin":      round(best_score - second_score, 3),
+            "matched_keywords":  list(dict.fromkeys(channel_keywords.get(winner, []))),
             "domain_boost_used": domain_boost_str,
         }
 
@@ -257,6 +305,18 @@ def _parse_hashtags(facets: Optional[list]) -> List[str]:
                 if tag:
                     tags.append(tag)
     return tags
+
+
+def _parse_facet_links(facets: Optional[list]) -> List[str]:
+    """Extract link URIs from AT Protocol richtext facets (app.bsky.richtext.facet#link)."""
+    links: List[str] = []
+    for facet in (facets or []):
+        for feature in (facet.get("features") or []):
+            if feature.get("$type") == "app.bsky.richtext.facet#link":
+                uri = feature.get("uri", "")
+                if uri:
+                    links.append(uri)
+    return links
 
 
 def _parse_embed(record: dict) -> dict:
@@ -302,6 +362,11 @@ def _parse_embed(record: dict) -> dict:
             alt_texts   = [img.get("alt", "") for img in images if img.get("alt")]
         elif mtype == "app.bsky.embed.video":
             has_video = True
+        elif mtype == "app.bsky.embed.external":
+            ext             = media.get("external") or {}
+            external_uri    = ext.get("uri", "")
+            external_domain = _extract_domain(external_uri) if external_uri else ""
+            has_external    = bool(external_uri)
 
     return {
         "embed_type":        etype,
@@ -338,23 +403,43 @@ def _normalize_post(msg: dict, router: BlueskyTopicRouter) -> Optional[Dict]:
     root_uri   = reply_ref["root"]["uri"]   if is_reply else post_uri
     parent_uri = reply_ref["parent"]["uri"] if is_reply else ""
 
-    embed_info   = _parse_embed(record)
+    facets   = record.get("facets")
+    hashtags = _parse_hashtags(facets)
+
+    # Embed parsing (fix 4: recordWithMedia external now handled)
+    embed_info = _parse_embed(record)
+
+    # URL fallback: facet links first, then body text regex, when embed has no external link
+    if not embed_info["has_external_link"]:
+        facet_links = _parse_facet_links(facets)
+        raw_url = facet_links[0] if facet_links else None
+        if not raw_url:
+            m = _BODY_URL_RE.search(text)
+            raw_url = m.group(0) if m else None
+        if raw_url:
+            domain = _extract_domain(raw_url)
+            if domain:
+                embed_info = dict(embed_info)
+                embed_info["has_external_link"] = True
+                embed_info["external_uri"]      = raw_url
+                embed_info["external_domain"]   = domain
+
     external_url = embed_info["external_uri"] or None
-    routing      = router.classify_with_audit(text, url=external_url)
+    routing      = router.classify_with_audit(text, url=external_url, hashtags=hashtags)
     channel      = routing["channel"]
 
     timestamp = time_us // 1_000_000
 
     return {
-        # Legacy compatibility fields — same keys the existing pipeline expects
+        # Legacy compatibility fields
         "id":          post_uri,
         "subreddit":   channel,
         "body":        text,
         "timestamp":   timestamp,
         "author":      did,
-        "score":       0,           # likes arrive as separate events; unknown at ingest time
+        "score":       0,
         "story_id":    _stable_id(root_uri),
-        "story_title": text[:100],  # no title concept on Bluesky; best-effort snippet
+        "story_title": text[:100],
         "domain":      embed_info["external_domain"],
         "item_type":   "comment" if is_reply else "story",
         "item_id":     _stable_id(post_uri),
@@ -365,13 +450,13 @@ def _normalize_post(msg: dict, router: BlueskyTopicRouter) -> Optional[Dict]:
         "platform_item_uri":  post_uri,
         "platform_cid":       cid,
         "author_did":         did,
-        "author_handle":      "",   # not resolved at ingest time; requires separate API call
+        "author_handle":      "",
         "root_uri":           root_uri,
         "parent_uri":         parent_uri,
         "is_reply":           is_reply,
         "platform_item_type": "reply" if is_reply else "post",
         "langs":              record.get("langs") or [],
-        "hashtags":           _parse_hashtags(record.get("facets")),
+        "hashtags":           hashtags,
         **embed_info,
     }
 
@@ -388,6 +473,9 @@ class BlueskyIngestor(DataIngestor):
     fed by a background thread running a persistent asyncio event loop and a
     single persistent WebSocket connection.
 
+    Posts routed to 'general' (no keyword match) are dropped and not emitted
+    downstream — they are counted in _dropped_general for monitoring only.
+
     Args:
         lang_filter: only yield posts whose langs list contains this code.
                      Defaults to "en". Pass None to receive all languages.
@@ -399,9 +487,11 @@ class BlueskyIngestor(DataIngestor):
         lang_filter: Optional[str] = "en",
         queue_size:  int = 2000,
     ) -> None:
-        self._lang_filter = lang_filter
-        self._queue_size  = queue_size
-        self._router      = BlueskyTopicRouter()
+        self._lang_filter      = lang_filter
+        self._queue_size       = queue_size
+        self._router           = BlueskyTopicRouter()
+        self._processed        = 0
+        self._dropped_general  = 0
 
     def stream(self) -> Iterator[Dict]:
         q: queue.Queue = queue.Queue(maxsize=self._queue_size)
@@ -418,7 +508,7 @@ class BlueskyIngestor(DataIngestor):
         while True:
             try:
                 async with websockets.connect(_JETSTREAM_URL) as ws:
-                    delay = 5   # reset backoff on successful connect
+                    delay = 5
                     async for raw in ws:
                         msg = json.loads(raw)
 
@@ -437,6 +527,21 @@ class BlueskyIngestor(DataIngestor):
 
                         item = _normalize_post(msg, self._router)
                         if item is None:
+                            continue
+
+                        self._processed += 1
+
+                        # Drop unmatched chatter — general is a routing failure,
+                        # not a real signal channel
+                        if item["subreddit"] == "general":
+                            self._dropped_general += 1
+                            if self._dropped_general % 500 == 0:
+                                pct = 100 * self._dropped_general // max(self._processed, 1)
+                                print(
+                                    f"[bluesky] processed={self._processed} "
+                                    f"dropped_general={self._dropped_general} ({pct}%)",
+                                    file=sys.stderr,
+                                )
                             continue
 
                         q.put(item)
