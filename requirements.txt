@@ -9,3 +9,4 @@ plotly
 google-cloud-storage
 pandas
 aiohttp
+websockets
