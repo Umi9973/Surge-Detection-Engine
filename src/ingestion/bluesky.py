@@ -6,7 +6,11 @@ import queue
 import re
 import sys
 import threading
+import time
 import zlib
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -176,6 +180,14 @@ _BODY_URL_RE = re.compile(
     r'(?<!\w)(?:youtu\.be|bit\.ly|t\.co|tinyurl\.com|open\.spotify\.com)/\S+',
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Debug output paths and limits
+# ---------------------------------------------------------------------------
+
+_DEBUG_BASE          = Path(__file__).resolve().parent.parent.parent / "data" / "debug" / "bluesky"
+_SUMMARY_INTERVAL_S  = 30    # rewrite run_summary JSON every N seconds
+_MAX_DROPPED_SAMPLES = 200   # max rows written to dropped JSONL per drop reason per session
 
 
 def _build_pattern(kw: str) -> re.Pattern:
@@ -406,7 +418,6 @@ def _normalize_post(msg: dict, router: BlueskyTopicRouter) -> Optional[Dict]:
     facets   = record.get("facets")
     hashtags = _parse_hashtags(facets)
 
-    # Embed parsing (fix 4: recordWithMedia external now handled)
     embed_info = _parse_embed(record)
 
     # URL fallback: facet links first, then body text regex, when embed has no external link
@@ -462,6 +473,49 @@ def _normalize_post(msg: dict, router: BlueskyTopicRouter) -> Optional[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# Debug helpers
+# ---------------------------------------------------------------------------
+
+def _drop_row(reason: str, msg: dict, item: Optional[Dict] = None) -> dict:
+    """Build a compact row for the dropped-posts JSONL diagnostic log."""
+    if item is not None:
+        routing = item["routing"]
+        return {
+            "id":              item["id"],
+            "body":            item["body"][:200],
+            "timestamp":       item["timestamp"],
+            "langs":           item["langs"],
+            "hashtags":        item["hashtags"],
+            "external_domain": item["external_domain"],
+            "embed_type":      item["embed_type"],
+            "drop_reason":     reason,
+            "top_score":       routing["top_score"],
+            "second_channel":  routing["second_channel"],
+            "second_score":    routing["second_score"],
+            "routing":         routing,
+        }
+    # Pre-normalization drop (non_english, empty_text) — extract from raw message
+    commit = msg.get("commit", {})
+    record = commit.get("record", {})
+    did    = msg.get("did", "")
+    rkey   = commit.get("rkey", "")
+    return {
+        "id":              f"at://{did}/app.bsky.feed.post/{rkey}",
+        "body":            (record.get("text") or "")[:200],
+        "timestamp":       msg.get("time_us", 0) // 1_000_000,
+        "langs":           record.get("langs") or [],
+        "hashtags":        _parse_hashtags(record.get("facets")),
+        "external_domain": "",
+        "embed_type":      (record.get("embed") or {}).get("$type", ""),
+        "drop_reason":     reason,
+        "top_score":       0.0,
+        "second_channel":  "",
+        "second_score":    0.0,
+        "routing":         {},
+    }
+
+
+# ---------------------------------------------------------------------------
 # Live ingestor
 # ---------------------------------------------------------------------------
 
@@ -469,12 +523,12 @@ class BlueskyIngestor(DataIngestor):
     """
     Streams Bluesky posts in real-time via the Jetstream WebSocket firehose.
 
-    Architecture mirrors HackerNewsIngestor: sync stream() drains a queue.Queue
-    fed by a background thread running a persistent asyncio event loop and a
-    single persistent WebSocket connection.
-
-    Posts routed to 'general' (no keyword match) are dropped and not emitted
-    downstream — they are counted in _dropped_general for monitoring only.
+    Three outputs per run:
+      1. Kept stream  — topical posts only → queue → downstream pipeline
+      2. Dropped log  — data/debug/bluesky/dropped/bluesky_dropped_YYYYMMDD_HHMM.jsonl
+                        Sampled (up to _MAX_DROPPED_SAMPLES rows per drop reason).
+      3. Run summary  — data/debug/bluesky/runs/run_summary_YYYYMMDD_HHMM.json
+                        Overwritten every _SUMMARY_INTERVAL_S seconds.
 
     Args:
         lang_filter: only yield posts whose langs list contains this code.
@@ -487,11 +541,9 @@ class BlueskyIngestor(DataIngestor):
         lang_filter: Optional[str] = "en",
         queue_size:  int = 2000,
     ) -> None:
-        self._lang_filter      = lang_filter
-        self._queue_size       = queue_size
-        self._router           = BlueskyTopicRouter()
-        self._processed        = 0
-        self._dropped_general  = 0
+        self._lang_filter = lang_filter
+        self._queue_size  = queue_size
+        self._router      = BlueskyTopicRouter()
 
     def stream(self) -> Iterator[Dict]:
         q: queue.Queue = queue.Queue(maxsize=self._queue_size)
@@ -503,53 +555,144 @@ class BlueskyIngestor(DataIngestor):
     def _run_background(self, q: queue.Queue) -> None:
         asyncio.run(self._async_main(q))
 
+    @staticmethod
+    def _write_summary(path: Path, data: dict) -> None:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
+
     async def _async_main(self, q: queue.Queue) -> None:
-        delay = 5
-        while True:
-            try:
-                async with websockets.connect(_JETSTREAM_URL) as ws:
-                    delay = 5
-                    async for raw in ws:
-                        msg = json.loads(raw)
+        ts          = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+        dropped_dir = _DEBUG_BASE / "dropped"
+        runs_dir    = _DEBUG_BASE / "runs"
+        dropped_dir.mkdir(parents=True, exist_ok=True)
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        dropped_path = dropped_dir / f"bluesky_dropped_{ts}.jsonl"
+        summary_path = runs_dir    / f"run_summary_{ts}.json"
 
-                        if msg.get("kind") != "commit":
-                            continue
-                        commit = msg.get("commit", {})
-                        if commit.get("collection") != "app.bsky.feed.post":
-                            continue
-                        if commit.get("operation") != "create":
-                            continue
+        # Counters
+        total_seen          = 0
+        english_seen        = 0
+        kept_count          = 0
+        dropped_by_reason:   Counter = Counter()
+        kept_by_channel:     Counter = Counter()
+        matched_keywords:    Counter = Counter()
+        unmatched_hashtags:  Counter = Counter()
+        unmatched_domains:   Counter = Counter()
+        samples_per_reason:  Counter = Counter()
+        reconnect_count     = 0
+        last_summary        = time.monotonic()
+        delay               = 5
 
-                        if self._lang_filter:
-                            record = commit.get("record", {})
-                            if self._lang_filter not in (record.get("langs") or []):
+        # Write zeroed summary immediately so a file exists from the start
+        self._write_summary(summary_path, {
+            "total_seen": 0, "english_seen": 0, "kept_count": 0,
+            "dropped_count": 0, "kept_rate": 0.0, "dropped_rate": 0.0,
+            "dropped_by_reason": {}, "kept_by_channel": {},
+            "top_matched_keywords": {}, "top_unmatched_hashtags": {},
+            "top_unmatched_domains": {}, "sample_dropped_count": 0,
+            "reconnect_count": 0,
+        })
+
+        with open(dropped_path, "w", encoding="utf-8") as drop_f:
+            while True:
+                try:
+                    async with websockets.connect(_JETSTREAM_URL) as ws:
+                        delay = 5
+                        async for raw in ws:
+                            now = time.monotonic()
+
+                            # Periodic summary rewrite (checked on every message)
+                            if now - last_summary >= _SUMMARY_INTERVAL_S:
+                                dropped_count = sum(dropped_by_reason.values())
+                                self._write_summary(summary_path, {
+                                    "total_seen":             total_seen,
+                                    "english_seen":           english_seen,
+                                    "kept_count":             kept_count,
+                                    "dropped_count":          dropped_count,
+                                    "kept_rate":              round(kept_count / max(total_seen, 1), 4),
+                                    "dropped_rate":           round(dropped_count / max(total_seen, 1), 4),
+                                    "dropped_by_reason":      dict(dropped_by_reason),
+                                    "kept_by_channel":        dict(kept_by_channel),
+                                    "top_matched_keywords":   dict(matched_keywords.most_common(20)),
+                                    "top_unmatched_hashtags": dict(unmatched_hashtags.most_common(30)),
+                                    "top_unmatched_domains":  dict(unmatched_domains.most_common(20)),
+                                    "sample_dropped_count":   sum(samples_per_reason.values()),
+                                    "reconnect_count":        reconnect_count,
+                                })
+                                drop_f.flush()
+                                last_summary = now
+
+                            msg = json.loads(raw)
+
+                            if msg.get("kind") != "commit":
+                                continue
+                            commit = msg.get("commit", {})
+                            if commit.get("collection") != "app.bsky.feed.post":
+                                continue
+                            if commit.get("operation") != "create":
                                 continue
 
-                        item = _normalize_post(msg, self._router)
-                        if item is None:
-                            continue
+                            record = commit.get("record", {})
+                            text   = (record.get("text") or "").strip()
+                            total_seen += 1
 
-                        self._processed += 1
+                            # ── Drop: empty text ──────────────────────────────
+                            if not text:
+                                reason = "empty_text"
+                                dropped_by_reason[reason] += 1
+                                if samples_per_reason[reason] < _MAX_DROPPED_SAMPLES:
+                                    samples_per_reason[reason] += 1
+                                    drop_f.write(json.dumps(_drop_row(reason, msg), ensure_ascii=False) + "\n")
+                                continue
 
-                        # Drop unmatched chatter — general is a routing failure,
-                        # not a real signal channel
-                        if item["subreddit"] == "general":
-                            self._dropped_general += 1
-                            if self._dropped_general % 500 == 0:
-                                pct = 100 * self._dropped_general // max(self._processed, 1)
-                                print(
-                                    f"[bluesky] processed={self._processed} "
-                                    f"dropped_general={self._dropped_general} ({pct}%)",
-                                    file=sys.stderr,
-                                )
-                            continue
+                            # ── Drop: non-English ─────────────────────────────
+                            if self._lang_filter and self._lang_filter not in (record.get("langs") or []):
+                                reason = "non_english"
+                                dropped_by_reason[reason] += 1
+                                if samples_per_reason[reason] < _MAX_DROPPED_SAMPLES:
+                                    samples_per_reason[reason] += 1
+                                    drop_f.write(json.dumps(_drop_row(reason, msg), ensure_ascii=False) + "\n")
+                                continue
 
-                        q.put(item)
+                            english_seen += 1
 
-            except Exception as exc:
-                print(
-                    f"[bluesky] websocket error: {type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 60)
+                            # Normalize + route
+                            item = _normalize_post(msg, self._router)
+                            if item is None:
+                                reason = "empty_text"
+                                dropped_by_reason[reason] += 1
+                                continue
+
+                            channel = item["subreddit"]
+
+                            # ── Drop: unmatched topic ─────────────────────────
+                            if channel == "general":
+                                reason = "unmatched_topic"
+                                dropped_by_reason[reason] += 1
+                                if samples_per_reason[reason] < _MAX_DROPPED_SAMPLES:
+                                    samples_per_reason[reason] += 1
+                                    drop_f.write(json.dumps(_drop_row(reason, msg, item), ensure_ascii=False) + "\n")
+                                for ht in item["hashtags"]:
+                                    unmatched_hashtags[ht] += 1
+                                if item["external_domain"]:
+                                    unmatched_domains[item["external_domain"]] += 1
+                                continue
+
+                            # ── Keep ──────────────────────────────────────────
+                            kept_count += 1
+                            kept_by_channel[channel] += 1
+                            for kw in item["routing"].get("matched_keywords", []):
+                                matched_keywords[kw] += 1
+                            q.put(item)
+
+                except Exception as exc:
+                    reconnect_count += 1
+                    print(
+                        f"[bluesky] websocket error: {type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 60)
