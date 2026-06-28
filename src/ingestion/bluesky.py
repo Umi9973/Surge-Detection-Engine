@@ -75,11 +75,12 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
     ],
     "science_health": [
         ("nasa", 3), ("crispr", 3), ("fda", 3), ("cdc", 3), ("nih", 3),
-        ("spacex", 3), ("arxiv", 3), ("zev", 3),
+        ("spacex", 3), ("arxiv", 3),
         ("climate change", 2), ("mental health", 2), ("vaccine", 2), ("pandemic", 2),
         ("clinical trial", 2), ("space exploration", 2), ("astronomy", 2), ("genomics", 2),
         ("electric vehicle", 2), ("heat wave", 2), ("wet bulb", 2),
         ("carbon emissions", 2), ("renewable energy", 2), ("climate crisis", 2),
+        ("zev", 2),
         ("science", 1), ("health", 1), ("medicine", 1), ("study", 1),
         ("discovery", 1), ("space", 1), ("climate", 1), ("biology", 1),
     ],
@@ -108,14 +109,20 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
         ("nintendo", 3), ("patreon", 3),
         ("pokemon", 3), ("ffxiv", 3), ("evangelion", 3), ("criticalrole", 3),
         ("genshin", 3), ("valorant", 3), ("elden ring", 3), ("hogwarts", 3),
-        ("starwars", 3), ("dragonball", 3), ("onepiece", 3), ("jujutsu", 3),
+        # Compound fandom names: both concatenated (for hashtag exact match) and
+        # spaced (for CamelCase-split hashtag and body text)
+        ("starwars", 3), ("star wars", 3),
+        ("dragonball", 3), ("dragon ball", 3),
+        ("onepiece", 3), ("one piece", 3),
+        ("jujutsu", 3),
         ("gaming", 2), ("streaming", 2), ("anime", 2), ("fan fiction", 2),
         ("cosplay", 2), ("creator economy", 2), ("influencer", 2),
         ("new album", 2), ("music video", 2), ("music festival", 2),
-        ("fanart", 2), ("fandom", 2), ("radio", 2),
+        ("fanart", 2), ("fandom", 2), ("internet radio", 2),
         ("game", 1), ("movie", 1), ("music", 1), ("film", 1), ("show", 1),
         ("art", 1), ("book", 1), ("entertainment", 1), ("song", 1), ("album", 1),
         ("artist", 1), ("band", 1), ("trailer", 1), ("concert", 1), ("manga", 1),
+        ("radio", 1),
     ],
     "social_movements": [
         ("lgbtq", 3), ("blm", 3), ("metoo", 3), ("aclu", 3),
@@ -137,7 +144,7 @@ _DOMAIN_BOOSTS: Dict[str, Tuple[str, float]] = {
     "aljazeera.com":             ("world_news",           2),
     "smh.com.au":                ("world_news",           2),
     "abc.net.au":                ("world_news",           2),
-    "abc7.com":                  ("world_news",           2),
+    "abc7.com":                  ("world_news",           1),   # local US — weak signal only
     "nation.cymru":              ("world_news",           2),
     "washingtonpost.com":        ("politics_government",  2),
     "politico.com":              ("politics_government",  3),
@@ -192,26 +199,36 @@ _HASHTAG_WEIGHT_MULT = 1.5
 _CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 # Regex to extract bare URLs from body text (fallback when no embed external link).
-# Catches https?:// URLs and common bare short-domain patterns (youtu.be, etc.).
 _BODY_URL_RE = re.compile(
     r'https?://[^\s<>"\')]+|'
     r'(?<!\w)(?:youtu\.be|bit\.ly|t\.co|tinyurl\.com|open\.spotify\.com)/\S+',
     re.IGNORECASE,
 )
 
-# Adult/NSFW hashtag blocklist — drops before routing to keep stats clean.
+# Adult/NSFW hashtag blocklist — dropped before routing to keep stats clean.
 _ADULT_HASHTAGS: frozenset = frozenset({
     "nsfw", "porn", "nude", "naked", "xxx", "gayporn", "onlyfans",
     "fansly", "18+", "adult", "horny", "nudes", "explicit",
 })
 
-# Wordle/Connections/game-grid emoji pattern — 4+ coloured squares in a row.
+# Wordle/Connections grid: 4+ coloured square emoji in sequence.
+# Only triggers routine_template when COMBINED with a game word or routine hashtag.
 _ROUTINE_EMOJI_RE = re.compile(r"[⬜🟨🟩⬛🟥🟦]{4,}", re.UNICODE)
 
-# Hashtags that mark recurring game-share templates, not events.
+# Known recurring game-share keywords in body text.
+_ROUTINE_WORD_RE = re.compile(
+    r"\b(wordle|connections|quordle|worldle|daily puzzle|nyt games)\b",
+    re.IGNORECASE,
+)
+
+# Hashtags that mark recurring game-share templates.
 _ROUTINE_HASHTAGS: frozenset = frozenset({
     "wordle", "connections", "nytgames", "worldle", "quordle", "starbattle",
 })
+
+# Language mismatch: strip URLs, @mentions, #hashtags before ratio check so
+# they don't dilute the Latin-character count of otherwise English posts.
+_LANG_STRIP_RE = re.compile(r"https?://\S+|@\w+|#\w+", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # Debug output paths and limits
@@ -238,16 +255,18 @@ def _extract_domain(url: str) -> str:
 
 class BlueskyTopicRouter:
     """
-    Classify a Bluesky post body (+ optional external URL + hashtags) into an
-    Option B channel.
+    Classify a Bluesky post body (+ optional embed text + external URL + hashtags)
+    into an Option B channel.
 
-    Scoring has three layers:
-      1. Keyword scan on body text (weighted sum, word-boundary regex)
-      2. Hashtag scan — same patterns, scores multiplied by _HASHTAG_WEIGHT_MULT
-         (hashtags are intentional signals, higher confidence than incidental text)
-      3. Domain boost on external URL (from embed or body text fallback)
+    Scoring has four layers:
+      1a. Keyword scan on body text only            → body_score per channel
+      1b. Keyword scan on embed title+description   → embed_score per channel
+      2.  Hashtag scan (CamelCase split, ×1.5)      → added to body_score
+      3.  Domain boost from external URL
 
-    Returns 'general' when no channel scores above zero.
+    Audit dict includes body_score and embed_score for the winning channel so
+    callers can tell whether a short post was routed by its own text or the
+    link preview metadata.
     """
 
     def __init__(self) -> None:
@@ -256,29 +275,43 @@ class BlueskyTopicRouter:
             for ch, entries in _TOPIC_CHANNELS.items()
         }
 
-    def classify(self, text: str, url: Optional[str] = None,
-                 hashtags: Optional[List[str]] = None) -> str:
-        return self.classify_with_audit(text, url, hashtags)["channel"]
+    def classify(self, body: str, url: Optional[str] = None,
+                 hashtags: Optional[List[str]] = None,
+                 embed_text: str = "") -> str:
+        return self.classify_with_audit(body, url, hashtags, embed_text)["channel"]
 
-    def classify_with_audit(self, text: str, url: Optional[str] = None,
-                            hashtags: Optional[List[str]] = None) -> Dict:
-        """Return full routing decision including scores, matched keywords, domain boost."""
-        channel_scores:   Dict[str, float]     = {}
+    def classify_with_audit(self, body: str, url: Optional[str] = None,
+                            hashtags: Optional[List[str]] = None,
+                            embed_text: str = "") -> Dict:
+        """Return full routing decision with per-source score breakdown."""
+        body_scores:    Dict[str, float]     = {}
+        embed_scores:   Dict[str, float]     = {}
         channel_keywords: Dict[str, List[str]] = {}
 
-        # Pass 1 — body text (includes embed title + description, pre-concatenated by caller)
+        # Pass 1a — body text
         for ch, pat_kw_weights in self._patterns.items():
             matched, total = [], 0.0
             for pat, kw, weight in pat_kw_weights:
-                if pat.search(text):
+                if pat.search(body):
                     total  += weight
                     matched.append(kw)
             if total > 0:
-                channel_scores[ch]   = channel_scores.get(ch, 0) + total
+                body_scores[ch]      = total
                 channel_keywords[ch] = channel_keywords.get(ch, []) + matched
 
-        # Pass 2 — hashtags (CamelCase split then joined, weighted x1.5)
-        # Split e.g. MusicChallenge → Music Challenge so \bmusic\b matches.
+        # Pass 1b — embed title + description (separate score bucket)
+        if embed_text:
+            for ch, pat_kw_weights in self._patterns.items():
+                matched, total = [], 0.0
+                for pat, kw, weight in pat_kw_weights:
+                    if pat.search(embed_text):
+                        total  += weight
+                        matched.append(kw)
+                if total > 0:
+                    embed_scores[ch]     = total
+                    channel_keywords[ch] = channel_keywords.get(ch, []) + matched
+
+        # Pass 2 — hashtags (CamelCase split, ×1.5, counted in body_scores)
         if hashtags:
             hashtag_text = " ".join(_CAMEL_SPLIT_RE.sub(" ", tag) for tag in hashtags)
             for ch, pat_kw_weights in self._patterns.items():
@@ -289,23 +322,31 @@ class BlueskyTopicRouter:
                         total  += boosted
                         matched.append(kw)
                 if total > 0:
-                    channel_scores[ch]    = channel_scores.get(ch, 0) + total
-                    channel_keywords[ch]  = channel_keywords.get(ch, []) + matched
+                    body_scores[ch]      = body_scores.get(ch, 0) + total
+                    channel_keywords[ch] = channel_keywords.get(ch, []) + matched
 
-        # Pass 3 — domain boost from external URL
+        # Combined scores
+        all_channels = set(body_scores) | set(embed_scores)
+        channel_scores = {
+            ch: body_scores.get(ch, 0) + embed_scores.get(ch, 0)
+            for ch in all_channels
+        }
+
+        # Pass 3 — domain boost
         domain_boost_str = ""
         if url:
             domain = _extract_domain(url)
             if domain in _DOMAIN_BOOSTS:
                 ch, boost = _DOMAIN_BOOSTS[domain]
-                channel_scores[ch] = channel_scores.get(ch, 0) + boost
-                domain_boost_str   = f"{domain} → {ch}+{int(boost)}"
+                channel_scores[ch]   = channel_scores.get(ch, 0) + boost
+                domain_boost_str     = f"{domain} → {ch}+{int(boost)}"
 
         if not channel_scores:
             return {
                 "channel": "general", "top_score": 0.0,
                 "second_channel": "", "second_score": 0.0, "score_margin": 0.0,
                 "matched_keywords": [], "domain_boost_used": "",
+                "body_score": 0.0, "embed_score": 0.0,
             }
 
         best_score = max(channel_scores.values())
@@ -327,6 +368,8 @@ class BlueskyTopicRouter:
             "score_margin":      round(best_score - second_score, 3),
             "matched_keywords":  list(dict.fromkeys(channel_keywords.get(winner, []))),
             "domain_boost_used": domain_boost_str,
+            "body_score":        round(body_scores.get(winner, 0), 3),
+            "embed_score":       round(embed_scores.get(winner, 0), 3),
         }
 
 
@@ -352,7 +395,7 @@ def _parse_hashtags(facets: Optional[list]) -> List[str]:
 
 
 def _parse_facet_links(facets: Optional[list]) -> List[str]:
-    """Extract link URIs from AT Protocol richtext facets (app.bsky.richtext.facet#link)."""
+    """Extract link URIs from AT Protocol richtext facets."""
     links: List[str] = []
     for facet in (facets or []):
         for feature in (facet.get("features") or []):
@@ -426,7 +469,7 @@ def _parse_embed(record: dict) -> dict:
 
 
 def _embed_routing_text(record: dict) -> str:
-    """Extract embed external title + description for routing (not stored on item)."""
+    """Return embed external title + description for routing (not stored on item)."""
     embed = record.get("embed") or {}
     etype = embed.get("$type", "")
     ext: dict = {}
@@ -467,7 +510,7 @@ def _normalize_post(msg: dict, router: BlueskyTopicRouter) -> Optional[Dict]:
 
     embed_info = _parse_embed(record)
 
-    # URL fallback: facet links first, then body text regex, when embed has no external link
+    # URL fallback: facet links first, then body text regex
     if not embed_info["has_external_link"]:
         facet_links = _parse_facet_links(facets)
         raw_url = facet_links[0] if facet_links else None
@@ -482,15 +525,13 @@ def _normalize_post(msg: dict, router: BlueskyTopicRouter) -> Optional[Dict]:
                 embed_info["external_uri"]      = raw_url
                 embed_info["external_domain"]   = domain
 
-    # Routing text = body + embed title/description (title/description not stored on item)
-    extra = _embed_routing_text(record)
-    routing_text = f"{text} {extra}".strip() if extra else text
-
+    # Embed title/description passed separately so router can track body_score vs embed_score
+    embed_text   = _embed_routing_text(record)
     external_url = embed_info["external_uri"] or None
-    routing      = router.classify_with_audit(routing_text, url=external_url, hashtags=hashtags)
+    routing      = router.classify_with_audit(text, url=external_url,
+                                              hashtags=hashtags, embed_text=embed_text)
     channel      = routing["channel"]
-
-    timestamp = time_us // 1_000_000
+    timestamp    = time_us // 1_000_000
 
     return {
         # Legacy compatibility fields
@@ -541,11 +582,13 @@ def _drop_row(reason: str, msg: dict, item: Optional[Dict] = None) -> dict:
             "embed_type":      item["embed_type"],
             "drop_reason":     reason,
             "top_score":       routing["top_score"],
+            "body_score":      routing.get("body_score", 0.0),
+            "embed_score":     routing.get("embed_score", 0.0),
             "second_channel":  routing["second_channel"],
             "second_score":    routing["second_score"],
             "routing":         routing,
         }
-    # Pre-normalization drop (non_english, empty_text, language_mismatch) — extract from raw
+    # Pre-normalization drop — extract from raw message
     commit = msg.get("commit", {})
     record = commit.get("record", {})
     did    = msg.get("did", "")
@@ -560,6 +603,8 @@ def _drop_row(reason: str, msg: dict, item: Optional[Dict] = None) -> dict:
         "embed_type":      (record.get("embed") or {}).get("$type", ""),
         "drop_reason":     reason,
         "top_score":       0.0,
+        "body_score":      0.0,
+        "embed_score":     0.0,
         "second_channel":  "",
         "second_score":    0.0,
         "routing":         {},
@@ -577,22 +622,15 @@ class BlueskyIngestor(DataIngestor):
     Three outputs per run:
       1. Kept stream  — topical posts only → queue → downstream pipeline
       2. Dropped log  — data/debug/bluesky/dropped/bluesky_dropped_YYYYMMDD_HHMM.jsonl
-                        Sampled (up to _MAX_DROPPED_SAMPLES rows per drop reason).
       3. Run summary  — data/debug/bluesky/runs/run_summary_YYYYMMDD_HHMM.json
-                        Overwritten every _SUMMARY_INTERVAL_S seconds.
 
     Drop reasons (in pipeline order):
       empty_text        — no text after strip
       non_english       — langs filter miss
-      language_mismatch — langs=en but body is non-Latin script
+      language_mismatch — langs=en but body is non-Latin alphabetic script
       adult_spam        — NSFW hashtags detected
-      routine_template  — Wordle/Connections grid or game hashtag
+      routine_template  — Wordle/Connections: game hashtag OR (grid emoji + game word)
       unmatched_topic   — score 0 after full router
-
-    Args:
-        lang_filter: only yield posts whose langs list contains this code.
-                     Defaults to "en". Pass None to receive all languages.
-        queue_size:  internal queue depth (default 2000).
     """
 
     def __init__(
@@ -631,7 +669,6 @@ class BlueskyIngestor(DataIngestor):
         dropped_path = dropped_dir / f"bluesky_dropped_{ts}.jsonl"
         summary_path = runs_dir    / f"run_summary_{ts}.json"
 
-        # Counters
         total_seen          = 0
         english_seen        = 0
         kept_count          = 0
@@ -645,7 +682,6 @@ class BlueskyIngestor(DataIngestor):
         last_summary        = time.monotonic()
         delay               = 5
 
-        # Write zeroed summary immediately so a file exists from the start
         self._write_summary(summary_path, {
             "total_seen": 0, "english_seen": 0, "kept_count": 0,
             "dropped_count": 0, "kept_rate": 0.0, "dropped_rate": 0.0,
@@ -663,7 +699,6 @@ class BlueskyIngestor(DataIngestor):
                         async for raw in ws:
                             now = time.monotonic()
 
-                            # Periodic summary rewrite (checked on every message)
                             if now - last_summary >= _SUMMARY_INTERVAL_S:
                                 dropped_count = sum(dropped_by_reason.values())
                                 self._write_summary(summary_path, {
@@ -684,7 +719,7 @@ class BlueskyIngestor(DataIngestor):
                                 drop_f.flush()
                                 last_summary = now
 
-                            msg = json.loads(raw)
+                            msg    = json.loads(raw)
 
                             if msg.get("kind") != "commit":
                                 continue
@@ -719,15 +754,19 @@ class BlueskyIngestor(DataIngestor):
                             english_seen += 1
 
                             # ── Drop: language mismatch (langs=en false positive) ──
-                            # Latin script covers U+0000–U+024F; CJK/Thai/Cyrillic/Arabic fall outside.
-                            latin_chars = sum(1 for c in text if "\x00" <= c <= "ɏ")
-                            if len(text) > 10 and latin_chars < len(text) * 0.5:
-                                reason = "language_mismatch"
-                                dropped_by_reason[reason] += 1
-                                if samples_per_reason[reason] < _MAX_DROPPED_SAMPLES:
-                                    samples_per_reason[reason] += 1
-                                    drop_f.write(json.dumps(_drop_row(reason, msg), ensure_ascii=False) + "\n")
-                                continue
+                            # Strip URLs/@mentions/#hashtags before ratio — they dilute Latin count.
+                            # Only fire when text is long enough (>40 chars) and mostly non-Latin alpha.
+                            clean = _LANG_STRIP_RE.sub("", text).strip()
+                            if len(clean) > 40:
+                                alpha      = sum(1 for c in clean if c.isalpha())
+                                latin_alpha = sum(1 for c in clean if c.isalpha() and ord(c) <= 0x024F)
+                                if alpha > 0 and latin_alpha < alpha * 0.5:
+                                    reason = "language_mismatch"
+                                    dropped_by_reason[reason] += 1
+                                    if samples_per_reason[reason] < _MAX_DROPPED_SAMPLES:
+                                        samples_per_reason[reason] += 1
+                                        drop_f.write(json.dumps(_drop_row(reason, msg), ensure_ascii=False) + "\n")
+                                    continue
 
                             # Normalize + route
                             item = _normalize_post(msg, self._router)
@@ -744,9 +783,12 @@ class BlueskyIngestor(DataIngestor):
                                     drop_f.write(json.dumps(_drop_row(reason, msg, item), ensure_ascii=False) + "\n")
                                 continue
 
-                            # ── Drop: routine template (Wordle, Connections, etc.) ──
-                            if (_ROUTINE_EMOJI_RE.search(item["body"]) or
-                                    any(ht.lower() in _ROUTINE_HASHTAGS for ht in item["hashtags"])):
+                            # ── Drop: routine template ────────────────────────
+                            # Emoji grid alone is too broad; require game hashtag OR game word.
+                            has_routine_tag  = any(ht.lower() in _ROUTINE_HASHTAGS for ht in item["hashtags"])
+                            has_game_word    = bool(_ROUTINE_WORD_RE.search(item["body"]))
+                            has_grid_emoji   = bool(_ROUTINE_EMOJI_RE.search(item["body"]))
+                            if has_routine_tag or (has_grid_emoji and has_game_word):
                                 reason = "routine_template"
                                 dropped_by_reason[reason] += 1
                                 if samples_per_reason[reason] < _MAX_DROPPED_SAMPLES:
