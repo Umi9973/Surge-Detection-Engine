@@ -61,6 +61,8 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
         ("doj", 3), ("dhs", 3), ("fec", 3),
         ("election", 2), ("legislation", 2), ("regulation", 2), ("campaign", 2),
         ("voting rights", 2), ("executive order", 2), ("filibuster", 2), ("impeach", 2),
+        ("maga", 2), ("liberal", 2), ("conservative", 2), ("parliament", 2),
+        ("premier", 2), ("minister", 2), ("monarchy", 2), ("senate bill", 2),
         ("politics", 1), ("policy", 1), ("vote", 1), ("law", 1), ("government", 1), ("president", 1),
     ],
     "world_news": [
@@ -73,9 +75,11 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
     ],
     "science_health": [
         ("nasa", 3), ("crispr", 3), ("fda", 3), ("cdc", 3), ("nih", 3),
-        ("spacex", 3), ("arxiv", 3),
+        ("spacex", 3), ("arxiv", 3), ("zev", 3),
         ("climate change", 2), ("mental health", 2), ("vaccine", 2), ("pandemic", 2),
         ("clinical trial", 2), ("space exploration", 2), ("astronomy", 2), ("genomics", 2),
+        ("electric vehicle", 2), ("heat wave", 2), ("wet bulb", 2),
+        ("carbon emissions", 2), ("renewable energy", 2), ("climate crisis", 2),
         ("science", 1), ("health", 1), ("medicine", 1), ("study", 1),
         ("discovery", 1), ("space", 1), ("climate", 1), ("biology", 1),
     ],
@@ -95,15 +99,20 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
         ("social media", 2), ("content moderation", 2), ("algorithm", 2),
         ("disinformation", 2), ("misinformation", 2), ("journalism", 2),
         ("newsletter", 2), ("podcast", 2),
-        ("platform", 1), ("media", 1), ("viral", 1),
+        ("fediverse", 2), ("activitypub", 2), ("self-hosted", 2),
+        ("platform", 1), ("media", 1), ("viral", 1), ("rss", 1), ("blog", 1),
     ],
     "culture_creators": [
         ("netflix", 3), ("disney", 3), ("marvel", 3), ("spotify", 3),
         ("twitch", 3), ("steam", 3), ("playstation", 3), ("xbox", 3),
         ("nintendo", 3), ("patreon", 3),
+        ("pokemon", 3), ("ffxiv", 3), ("evangelion", 3), ("criticalrole", 3),
+        ("genshin", 3), ("valorant", 3), ("elden ring", 3), ("hogwarts", 3),
+        ("starwars", 3), ("dragonball", 3), ("onepiece", 3), ("jujutsu", 3),
         ("gaming", 2), ("streaming", 2), ("anime", 2), ("fan fiction", 2),
         ("cosplay", 2), ("creator economy", 2), ("influencer", 2),
         ("new album", 2), ("music video", 2), ("music festival", 2),
+        ("fanart", 2), ("fandom", 2), ("radio", 2),
         ("game", 1), ("movie", 1), ("music", 1), ("film", 1), ("show", 1),
         ("art", 1), ("book", 1), ("entertainment", 1), ("song", 1), ("album", 1),
         ("artist", 1), ("band", 1), ("trailer", 1), ("concert", 1), ("manga", 1),
@@ -120,38 +129,47 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
 
 # Domain → (channel, boost_weight). Exact netloc match after stripping www.
 _DOMAIN_BOOSTS: Dict[str, Tuple[str, float]] = {
-    "apnews.com":               ("world_news",           3),
-    "bbc.com":                  ("world_news",           2),
-    "reuters.com":              ("world_news",           2),
-    "theguardian.com":          ("world_news",           2),
-    "nytimes.com":              ("world_news",           2),
-    "aljazeera.com":            ("world_news",           2),
-    "washingtonpost.com":       ("politics_government",  2),
-    "politico.com":             ("politics_government",  3),
-    "thehill.com":              ("politics_government",  2),
-    "krebsonsecurity.com":      ("security_risk",        3),
-    "theregister.com":          ("security_risk",        2),
-    "wired.com":                ("security_risk",        1),
-    "arxiv.org":                ("science_health",       3),
-    "nature.com":               ("science_health",       3),
-    "science.org":              ("science_health",       3),
-    "pubmed.ncbi.nlm.nih.gov":  ("science_health",       3),
-    "nasa.gov":                 ("science_health",       3),
-    "coindesk.com":             ("economy_markets",      3),
-    "bloomberg.com":            ("economy_markets",      2),
-    "wsj.com":                  ("economy_markets",      2),
-    "ft.com":                   ("economy_markets",      2),
-    "github.com":               ("ai_tech",              2),
-    "techcrunch.com":           ("ai_tech",              2),
-    "arstechnica.com":          ("ai_tech",              2),
-    "youtu.be":                 ("culture_creators",     2),
-    "youtube.com":              ("culture_creators",     2),
-    "open.spotify.com":         ("culture_creators",     2),
-    "ign.com":                  ("culture_creators",     3),
-    "variety.com":              ("culture_creators",     2),
-    "rollingstone.com":         ("culture_creators",     2),
-    "niemanlab.org":            ("platform_media",       2),
-    "poynter.org":              ("platform_media",       2),
+    "apnews.com":                ("world_news",           3),
+    "bbc.com":                   ("world_news",           2),
+    "reuters.com":               ("world_news",           2),
+    "theguardian.com":           ("world_news",           2),
+    "nytimes.com":               ("world_news",           2),
+    "aljazeera.com":             ("world_news",           2),
+    "smh.com.au":                ("world_news",           2),
+    "abc.net.au":                ("world_news",           2),
+    "abc7.com":                  ("world_news",           2),
+    "nation.cymru":              ("world_news",           2),
+    "washingtonpost.com":        ("politics_government",  2),
+    "politico.com":              ("politics_government",  3),
+    "thehill.com":               ("politics_government",  2),
+    "salon.com":                 ("politics_government",  2),
+    "laprogressive.com":         ("politics_government",  2),
+    "krebsonsecurity.com":       ("security_risk",        3),
+    "theregister.com":           ("security_risk",        2),
+    "wired.com":                 ("security_risk",        1),
+    "arxiv.org":                 ("science_health",       3),
+    "nature.com":                ("science_health",       3),
+    "science.org":               ("science_health",       3),
+    "pubmed.ncbi.nlm.nih.gov":   ("science_health",       3),
+    "nasa.gov":                  ("science_health",       3),
+    "mesonet.agron.iastate.edu": ("science_health",       2),
+    "thedrive.com":              ("science_health",       1),
+    "coindesk.com":              ("economy_markets",      3),
+    "bloomberg.com":             ("economy_markets",      2),
+    "wsj.com":                   ("economy_markets",      2),
+    "ft.com":                    ("economy_markets",      2),
+    "github.com":                ("ai_tech",              2),
+    "techcrunch.com":            ("ai_tech",              2),
+    "arstechnica.com":           ("ai_tech",              2),
+    "youtu.be":                  ("culture_creators",     2),
+    "youtube.com":               ("culture_creators",     2),
+    "open.spotify.com":          ("culture_creators",     2),
+    "ign.com":                   ("culture_creators",     3),
+    "variety.com":               ("culture_creators",     2),
+    "rollingstone.com":          ("culture_creators",     2),
+    "berlinartlink.com":         ("culture_creators",     2),
+    "niemanlab.org":             ("platform_media",       2),
+    "poynter.org":               ("platform_media",       2),
 }
 
 # Priority order for tie-breaking. "general" is the catch-all, always last.
@@ -180,6 +198,20 @@ _BODY_URL_RE = re.compile(
     r'(?<!\w)(?:youtu\.be|bit\.ly|t\.co|tinyurl\.com|open\.spotify\.com)/\S+',
     re.IGNORECASE,
 )
+
+# Adult/NSFW hashtag blocklist — drops before routing to keep stats clean.
+_ADULT_HASHTAGS: frozenset = frozenset({
+    "nsfw", "porn", "nude", "naked", "xxx", "gayporn", "onlyfans",
+    "fansly", "18+", "adult", "horny", "nudes", "explicit",
+})
+
+# Wordle/Connections/game-grid emoji pattern — 4+ coloured squares in a row.
+_ROUTINE_EMOJI_RE = re.compile(r"[⬜🟨🟩⬛🟥🟦]{4,}", re.UNICODE)
+
+# Hashtags that mark recurring game-share templates, not events.
+_ROUTINE_HASHTAGS: frozenset = frozenset({
+    "wordle", "connections", "nytgames", "worldle", "quordle", "starbattle",
+})
 
 # ---------------------------------------------------------------------------
 # Debug output paths and limits
@@ -234,7 +266,7 @@ class BlueskyTopicRouter:
         channel_scores:   Dict[str, float]     = {}
         channel_keywords: Dict[str, List[str]] = {}
 
-        # Pass 1 — body text
+        # Pass 1 — body text (includes embed title + description, pre-concatenated by caller)
         for ch, pat_kw_weights in self._patterns.items():
             matched, total = [], 0.0
             for pat, kw, weight in pat_kw_weights:
@@ -393,6 +425,21 @@ def _parse_embed(record: dict) -> dict:
     }
 
 
+def _embed_routing_text(record: dict) -> str:
+    """Extract embed external title + description for routing (not stored on item)."""
+    embed = record.get("embed") or {}
+    etype = embed.get("$type", "")
+    ext: dict = {}
+    if etype == "app.bsky.embed.external":
+        ext = embed.get("external") or {}
+    elif etype == "app.bsky.embed.recordWithMedia":
+        media = embed.get("media") or {}
+        if media.get("$type") == "app.bsky.embed.external":
+            ext = media.get("external") or {}
+    parts = [ext.get("title", ""), ext.get("description", "")]
+    return " ".join(p for p in parts if p)
+
+
 def _normalize_post(msg: dict, router: BlueskyTopicRouter) -> Optional[Dict]:
     """
     Map a raw Jetstream commit message to the pipeline's normalized item dict.
@@ -435,8 +482,12 @@ def _normalize_post(msg: dict, router: BlueskyTopicRouter) -> Optional[Dict]:
                 embed_info["external_uri"]      = raw_url
                 embed_info["external_domain"]   = domain
 
+    # Routing text = body + embed title/description (title/description not stored on item)
+    extra = _embed_routing_text(record)
+    routing_text = f"{text} {extra}".strip() if extra else text
+
     external_url = embed_info["external_uri"] or None
-    routing      = router.classify_with_audit(text, url=external_url, hashtags=hashtags)
+    routing      = router.classify_with_audit(routing_text, url=external_url, hashtags=hashtags)
     channel      = routing["channel"]
 
     timestamp = time_us // 1_000_000
@@ -494,7 +545,7 @@ def _drop_row(reason: str, msg: dict, item: Optional[Dict] = None) -> dict:
             "second_score":    routing["second_score"],
             "routing":         routing,
         }
-    # Pre-normalization drop (non_english, empty_text) — extract from raw message
+    # Pre-normalization drop (non_english, empty_text, language_mismatch) — extract from raw
     commit = msg.get("commit", {})
     record = commit.get("record", {})
     did    = msg.get("did", "")
@@ -529,6 +580,14 @@ class BlueskyIngestor(DataIngestor):
                         Sampled (up to _MAX_DROPPED_SAMPLES rows per drop reason).
       3. Run summary  — data/debug/bluesky/runs/run_summary_YYYYMMDD_HHMM.json
                         Overwritten every _SUMMARY_INTERVAL_S seconds.
+
+    Drop reasons (in pipeline order):
+      empty_text        — no text after strip
+      non_english       — langs filter miss
+      language_mismatch — langs=en but body is non-Latin script
+      adult_spam        — NSFW hashtags detected
+      routine_template  — Wordle/Connections grid or game hashtag
+      unmatched_topic   — score 0 after full router
 
     Args:
         lang_filter: only yield posts whose langs list contains this code.
@@ -659,11 +718,40 @@ class BlueskyIngestor(DataIngestor):
 
                             english_seen += 1
 
+                            # ── Drop: language mismatch (langs=en false positive) ──
+                            # Latin script covers U+0000–U+024F; CJK/Thai/Cyrillic/Arabic fall outside.
+                            latin_chars = sum(1 for c in text if "\x00" <= c <= "ɏ")
+                            if len(text) > 10 and latin_chars < len(text) * 0.5:
+                                reason = "language_mismatch"
+                                dropped_by_reason[reason] += 1
+                                if samples_per_reason[reason] < _MAX_DROPPED_SAMPLES:
+                                    samples_per_reason[reason] += 1
+                                    drop_f.write(json.dumps(_drop_row(reason, msg), ensure_ascii=False) + "\n")
+                                continue
+
                             # Normalize + route
                             item = _normalize_post(msg, self._router)
                             if item is None:
-                                reason = "empty_text"
+                                dropped_by_reason["empty_text"] += 1
+                                continue
+
+                            # ── Drop: adult spam ──────────────────────────────
+                            if any(ht.lower() in _ADULT_HASHTAGS for ht in item["hashtags"]):
+                                reason = "adult_spam"
                                 dropped_by_reason[reason] += 1
+                                if samples_per_reason[reason] < _MAX_DROPPED_SAMPLES:
+                                    samples_per_reason[reason] += 1
+                                    drop_f.write(json.dumps(_drop_row(reason, msg, item), ensure_ascii=False) + "\n")
+                                continue
+
+                            # ── Drop: routine template (Wordle, Connections, etc.) ──
+                            if (_ROUTINE_EMOJI_RE.search(item["body"]) or
+                                    any(ht.lower() in _ROUTINE_HASHTAGS for ht in item["hashtags"])):
+                                reason = "routine_template"
+                                dropped_by_reason[reason] += 1
+                                if samples_per_reason[reason] < _MAX_DROPPED_SAMPLES:
+                                    samples_per_reason[reason] += 1
+                                    drop_f.write(json.dumps(_drop_row(reason, msg, item), ensure_ascii=False) + "\n")
                                 continue
 
                             channel = item["subreddit"]
