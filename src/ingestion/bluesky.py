@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 import websockets
 
 from .base import DataIngestor
+from .bluesky_hashtag_stats import HashtagStatsCollector
 
 # ---------------------------------------------------------------------------
 # Jetstream endpoint
@@ -270,9 +271,10 @@ _LANG_STRIP_RE = re.compile(r"https?://\S+|@\w+|#\w+", re.IGNORECASE)
 # Debug output paths and limits
 # ---------------------------------------------------------------------------
 
-_DEBUG_BASE          = Path(__file__).resolve().parent.parent.parent / "data" / "debug" / "bluesky"
-_SUMMARY_INTERVAL_S  = 30    # rewrite run_summary JSON every N seconds
-_MAX_DROPPED_SAMPLES = 200   # max rows written to dropped JSONL per drop reason per session
+_DEBUG_BASE              = Path(__file__).resolve().parent.parent.parent / "data" / "debug" / "bluesky"
+_SUMMARY_INTERVAL_S      = 30    # rewrite run_summary JSON every N seconds
+_HASHTAG_STATS_INTERVAL_S = 300  # rewrite hashtag_stats JSON every 5 minutes
+_MAX_DROPPED_SAMPLES     = 200   # max rows written to dropped JSONL per drop reason per session
 
 
 def _build_pattern(kw: str) -> re.Pattern:
@@ -700,13 +702,16 @@ class BlueskyIngestor(DataIngestor):
             pass
 
     async def _async_main(self, q: queue.Queue) -> None:
-        ts          = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
-        dropped_dir = _DEBUG_BASE / "dropped"
-        runs_dir    = _DEBUG_BASE / "runs"
+        ts               = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+        dropped_dir      = _DEBUG_BASE / "dropped"
+        runs_dir         = _DEBUG_BASE / "runs"
+        hashtag_stats_dir = _DEBUG_BASE / "hashtag_stats"
         dropped_dir.mkdir(parents=True, exist_ok=True)
         runs_dir.mkdir(parents=True, exist_ok=True)
-        dropped_path = dropped_dir / f"bluesky_dropped_{ts}.jsonl"
-        summary_path = runs_dir    / f"run_summary_{ts}.json"
+        hashtag_stats_dir.mkdir(parents=True, exist_ok=True)
+        dropped_path      = dropped_dir       / f"bluesky_dropped_{ts}.jsonl"
+        summary_path      = runs_dir          / f"run_summary_{ts}.json"
+        hashtag_stats_path = hashtag_stats_dir / f"hashtag_stats_{ts}.json"
 
         total_seen          = 0
         english_seen        = 0
@@ -717,9 +722,11 @@ class BlueskyIngestor(DataIngestor):
         unmatched_hashtags:  Counter = Counter()
         unmatched_domains:   Counter = Counter()
         samples_per_reason:  Counter = Counter()
-        reconnect_count     = 0
-        last_summary        = time.monotonic()
-        delay               = 5
+        reconnect_count      = 0
+        last_summary         = time.monotonic()
+        last_hashtag_stats   = time.monotonic()
+        delay                = 5
+        hashtag_collector    = HashtagStatsCollector()
 
         self._write_summary(summary_path, {
             "total_seen": 0, "english_seen": 0, "kept_count": 0,
@@ -737,6 +744,10 @@ class BlueskyIngestor(DataIngestor):
                         delay = 5
                         async for raw in ws:
                             now = time.monotonic()
+
+                            if now - last_hashtag_stats >= _HASHTAG_STATS_INTERVAL_S:
+                                hashtag_collector.write_snapshot(hashtag_stats_path)
+                                last_hashtag_stats = now
 
                             if now - last_summary >= _SUMMARY_INTERVAL_S:
                                 dropped_count = sum(dropped_by_reason.values())
@@ -820,6 +831,10 @@ class BlueskyIngestor(DataIngestor):
                                 if samples_per_reason[reason] < _MAX_DROPPED_SAMPLES:
                                     samples_per_reason[reason] += 1
                                     drop_f.write(json.dumps(_drop_row(reason, msg, item), ensure_ascii=False) + "\n")
+                                hashtag_collector.record(
+                                    item["hashtags"], item["subreddit"], reason,
+                                    item["author_did"], item["external_domain"], item["body"],
+                                )
                                 continue
 
                             # ── Drop: routine template ────────────────────────
@@ -833,6 +848,10 @@ class BlueskyIngestor(DataIngestor):
                                 if samples_per_reason[reason] < _MAX_DROPPED_SAMPLES:
                                     samples_per_reason[reason] += 1
                                     drop_f.write(json.dumps(_drop_row(reason, msg, item), ensure_ascii=False) + "\n")
+                                hashtag_collector.record(
+                                    item["hashtags"], item["subreddit"], reason,
+                                    item["author_did"], item["external_domain"], item["body"],
+                                )
                                 continue
 
                             channel = item["subreddit"]
@@ -848,6 +867,10 @@ class BlueskyIngestor(DataIngestor):
                                     unmatched_hashtags[ht] += 1
                                 if item["external_domain"]:
                                     unmatched_domains[item["external_domain"]] += 1
+                                hashtag_collector.record(
+                                    item["hashtags"], "general", reason,
+                                    item["author_did"], item["external_domain"], item["body"],
+                                )
                                 continue
 
                             # ── Keep ──────────────────────────────────────────
@@ -855,6 +878,10 @@ class BlueskyIngestor(DataIngestor):
                             kept_by_channel[channel] += 1
                             for kw in item["routing"].get("matched_keywords", []):
                                 matched_keywords[kw] += 1
+                            hashtag_collector.record(
+                                item["hashtags"], channel, "",
+                                item["author_did"], item["external_domain"], item["body"],
+                            )
                             q.put(item)
 
                 except Exception as exc:
