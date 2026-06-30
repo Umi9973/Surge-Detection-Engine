@@ -1,0 +1,18 @@
+[Unit]
+Description=HN Surge Detection — live ingestor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stevenc9973
+WorkingDirectory=/home/stevenc9973/Surge-Detection-Engine
+Environment=PYTHONPATH=/home/stevenc9973/Surge-Detection-Engine
+ExecStart=/usr/bin/python3 src/main.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
