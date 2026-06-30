@@ -83,6 +83,7 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
         ("zev", 2),
         ("science", 1), ("health", 1), ("medicine", 1), ("study", 1),
         ("discovery", 1), ("space", 1), ("climate", 1), ("biology", 1),
+        ("weather", 1), ("forecast", 1),
     ],
     "economy_markets": [
         ("bitcoin", 3), ("ethereum", 3), ("federal reserve", 3), ("wall street", 3),
@@ -119,6 +120,9 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
         ("cosplay", 2), ("creator economy", 2), ("influencer", 2),
         ("new album", 2), ("music video", 2), ("music festival", 2),
         ("fanart", 2), ("fandom", 2), ("internet radio", 2),
+        ("artfight", 3), ("deltarune", 3),
+        ("photography", 2), ("digital art", 2), ("digitalart", 2),
+        ("illustration", 2), ("furry art", 2), ("furryart", 2),
         ("game", 1), ("movie", 1), ("music", 1), ("film", 1), ("show", 1),
         ("art", 1), ("book", 1), ("entertainment", 1), ("song", 1), ("album", 1),
         ("artist", 1), ("band", 1), ("trailer", 1), ("concert", 1), ("manga", 1),
@@ -131,6 +135,19 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
         ("abortion", 2), ("inequality", 2), ("protest", 2), ("activism", 2),
         ("movement", 1), ("justice", 1), ("rights", 1), ("solidarity", 1),
         ("diversity", 1), ("inclusion", 1),
+    ],
+    "sports": [
+        ("nfl", 3), ("nba", 3), ("nhl", 3), ("mlb", 3), ("nascar", 3),
+        ("fifa", 3), ("uefa", 3), ("wimbledon", 3),
+        ("premier league", 3), ("champions league", 3), ("bundesliga", 3),
+        ("la liga", 3), ("serie a", 3),
+        ("super bowl", 2), ("world cup", 2), ("transfer window", 2),
+        ("match day", 2), ("fantasy football", 2), ("fantasy sports", 2),
+        ("playoffs", 2), ("championship", 2),
+        ("formula 1", 2), ("motorsport", 2), ("racing", 2),
+        ("football", 1), ("soccer", 1), ("tennis", 1), ("basketball", 1),
+        ("baseball", 1), ("cricket", 1), ("rugby", 1), ("golf", 1),
+        ("athletics", 1), ("cycling", 1),
     ],
 }
 
@@ -177,18 +194,25 @@ _DOMAIN_BOOSTS: Dict[str, Tuple[str, float]] = {
     "berlinartlink.com":         ("culture_creators",     2),
     "niemanlab.org":             ("platform_media",       2),
     "poynter.org":               ("platform_media",       2),
+    "bbc.co.uk":                 ("world_news",           2),
+    "spc.noaa.gov":              ("science_health",       2),
+    "weather.gov":               ("science_health",       2),
+    "europesays.com":            ("world_news",           1),
+    "ko-fi.com":                 ("culture_creators",     2),
+    "transfermarkt.com":         ("sports",               3),
+    "artfight.net":              ("culture_creators",     3),
 }
 
 # Priority order for tie-breaking. "general" is the catch-all, always last.
 _PRIORITY: List[str] = [
     "ai_tech", "security_risk", "politics_government", "world_news",
     "science_health", "economy_markets", "platform_media",
-    "culture_creators", "social_movements", "general",
+    "sports", "culture_creators", "social_movements", "general",
 ]
 
 # Keywords where left-boundary match only so inflected forms match:
 # hack → hacked/hacking, breach → breached, exploit → exploiting, etc.
-_PREFIX_ROOTS: frozenset = frozenset({"hack", "breach", "exploit", "leak", "protest"})
+_PREFIX_ROOTS: frozenset = frozenset({"hack", "breach", "exploit", "leak", "protest", "artfight"})
 
 # Hashtag keyword scoring multiplier — hashtags are intentional signals,
 # slightly higher weight than incidental body text matches.
@@ -197,6 +221,18 @@ _HASHTAG_WEIGHT_MULT = 1.5
 # Splits CamelCase hashtags into space-separated words before keyword matching.
 # e.g. MusicChallenge → Music Challenge, AINews → AI News
 _CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+# Hashtag alias expansions (layer 2).
+# Short or ambiguous hashtags that are too noisy to add as raw body-text keywords
+# get expanded into synthetic tokens that flow through normal _TOPIC_CHANNELS scoring.
+# Keys are lowercase; values are space-separated keyword strings.
+_HASHTAG_ALIASES: Dict[str, str] = {
+    "wx":          "weather noaa forecast",
+    "f1":          "formula 1 motorsport racing",
+    "oc":          "original character art creator",
+    "nowplaying":  "music song album artist",
+    "booksky":     "book reading author",
+}
 
 # Regex to extract bare URLs from body text (fallback when no embed external link).
 _BODY_URL_RE = re.compile(
@@ -311,9 +347,12 @@ class BlueskyTopicRouter:
                     embed_scores[ch]     = total
                     channel_keywords[ch] = channel_keywords.get(ch, []) + matched
 
-        # Pass 2 — hashtags (CamelCase split, ×1.5, counted in body_scores)
+        # Pass 2 — hashtags (alias expand or CamelCase split, ×1.5, counted in body_scores)
         if hashtags:
-            hashtag_text = " ".join(_CAMEL_SPLIT_RE.sub(" ", tag) for tag in hashtags)
+            hashtag_text = " ".join(
+                _HASHTAG_ALIASES.get(tag.lower()) or _CAMEL_SPLIT_RE.sub(" ", tag)
+                for tag in hashtags
+            )
             for ch, pat_kw_weights in self._patterns.items():
                 matched, total = [], 0.0
                 for pat, kw, weight in pat_kw_weights:
