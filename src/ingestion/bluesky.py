@@ -124,6 +124,7 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
         ("artfight", 3), ("deltarune", 3),
         ("photography", 2), ("digital art", 2), ("digitalart", 2),
         ("illustration", 2), ("furry art", 2), ("furryart", 2),
+        ("poetry", 2), ("writing community", 2), ("writingcommunity", 2),
         ("game", 1), ("movie", 1), ("music", 1), ("film", 1), ("show", 1),
         ("art", 1), ("book", 1), ("entertainment", 1), ("song", 1), ("album", 1),
         ("artist", 1), ("band", 1), ("trailer", 1), ("concert", 1), ("manga", 1),
@@ -139,7 +140,7 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
     ],
     "sports": [
         ("nfl", 3), ("nba", 3), ("nhl", 3), ("mlb", 3), ("nascar", 3),
-        ("fifa", 3), ("uefa", 3), ("wimbledon", 3),
+        ("fifa", 3), ("uefa", 3), ("wimbledon", 3), ("aew", 3), ("usmnt", 3),
         ("premier league", 3), ("champions league", 3), ("bundesliga", 3),
         ("la liga", 3), ("serie a", 3),
         ("super bowl", 2), ("world cup", 2), ("transfer window", 2),
@@ -198,10 +199,14 @@ _DOMAIN_BOOSTS: Dict[str, Tuple[str, float]] = {
     "bbc.co.uk":                 ("world_news",           2),
     "spc.noaa.gov":              ("science_health",       2),
     "weather.gov":               ("science_health",       2),
+    "wpc.ncep.noaa.gov":         ("science_health",       2),
     "europesays.com":            ("world_news",           1),
+    "msn.com":                   ("world_news",           1),
     "ko-fi.com":                 ("culture_creators",     2),
     "transfermarkt.com":         ("sports",               3),
     "artfight.net":              ("culture_creators",     3),
+    "archiveofourown.org":       ("culture_creators",     3),
+    "store.steampowered.com":    ("culture_creators",     3),
 }
 
 # Priority order for tie-breaking. "general" is the catch-all, always last.
@@ -228,11 +233,19 @@ _CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 # get expanded into synthetic tokens that flow through normal _TOPIC_CHANNELS scoring.
 # Keys are lowercase; values are space-separated keyword strings.
 _HASHTAG_ALIASES: Dict[str, str] = {
-    "wx":          "weather noaa forecast",
-    "f1":          "formula 1 motorsport racing",
-    "oc":          "original character art creator",
-    "nowplaying":  "music song album artist",
-    "booksky":     "book reading author",
+    "wx":             "weather noaa forecast",
+    "f1":             "formula 1 motorsport racing",
+    "oc":             "original character art creator",
+    "nowplaying":     "music song album artist",
+    "booksky":        "book reading author",
+    "worldcup":       "world cup soccer sports",
+    "loveislandusa":  "reality tv show entertainment",
+    "loveisland":     "reality tv show entertainment",
+    "gamedev":        "game developer creator",
+    "indiedev":       "game developer creator",
+    "indiegame":      "game developer creator",
+    "usmnt":          "soccer team sports",
+    "resist":         "protest activism movement rights",
 }
 
 # Regex to extract bare URLs from body text (fallback when no embed external link).
@@ -246,6 +259,7 @@ _BODY_URL_RE = re.compile(
 _ADULT_HASHTAGS: frozenset = frozenset({
     "nsfw", "porn", "nude", "naked", "xxx", "gayporn", "onlyfans",
     "fansly", "18+", "adult", "horny", "nudes", "explicit",
+    "findom", "femdom", "paypig", "finsub",
 })
 
 # Wordle/Connections grid: 4+ coloured square emoji in sequence.
