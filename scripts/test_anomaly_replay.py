@@ -16,7 +16,7 @@ What it tests:
 
 Usage:
     python scripts/test_anomaly_replay.py
-    python scripts/test_anomaly_replay.py --surge-channel culture_creators --surge-mult 4.0
+    python scripts/test_anomaly_replay.py --surge-channel entertainment_fandom --surge-mult 4.0
     python scripts/test_anomaly_replay.py --min-history 3
 """
 from __future__ import annotations
@@ -47,27 +47,29 @@ from src.storage.state_manager import RedisStateManager
 # ---------------------------------------------------------------------------
 
 BSKY_CHANNELS = [
-    "ai_tech", "security_risk", "politics_government", "world_news",
-    "science_health", "economy_markets", "platform_media",
-    "sports", "culture_creators", "social_movements",
+    "cybersecurity", "ai_tech", "war_diplomacy", "us_politics",
+    "activism_rights", "climate_weather", "health_medicine", "science_space",
+    "money_markets", "social_platforms", "sports", "entertainment_fandom",
 ]
 
 # Normal 2-hour window count per channel used for both baseline history
 # and the "normal" window population. baseline_tick() stores the 2h window
 # count (not hourly rate), so history and window must use the same scale.
-# Values below are proportional to the overnight channel shares but scaled
-# to a manageable test size (total ~2,000 posts/2h across all channels).
+# Values below are proportional to expected channel shares scaled to
+# ~2,000 posts/2h total. science_health was split into three channels.
 _BASELINE_WINDOW_COUNTS = {
-    "culture_creators":      540,
-    "politics_government":   415,
-    "platform_media":        281,
-    "world_news":            207,
-    "science_health":        139,
-    "ai_tech":               129,
+    "entertainment_fandom":  540,
+    "us_politics":           415,
+    "social_platforms":      220,
+    "war_diplomacy":         170,
+    "ai_tech":               135,
     "sports":                115,
-    "economy_markets":        88,
-    "social_movements":       49,
-    "security_risk":          34,
+    "money_markets":          88,
+    "climate_weather":        80,
+    "health_medicine":        65,
+    "science_space":          55,
+    "activism_rights":        55,
+    "cybersecurity":          40,
 }
 
 
@@ -126,7 +128,7 @@ def _bodies_by_channel(samples: List[Dict]) -> Dict[str, List[str]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bluesky anomaly shadow replay test")
-    parser.add_argument("--surge-channel", default="politics_government",
+    parser.add_argument("--surge-channel", default="us_politics",
                         help="Channel to inject surge into (default: politics_government)")
     parser.add_argument("--surge-mult",    type=float, default=5.0,
                         help="Surge multiplier vs baseline rate (default: 5.0)")

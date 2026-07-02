@@ -37,75 +37,147 @@ _JETSTREAM_URL = (
 #   2 — domain jargon / multi-word phrases (strong signal, low FP risk)
 #   1 — generic single words (weak signal, never win a tie alone)
 _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
+    # ── AI & Tech ─────────────────────────────────────────────────────────────
+    # Big-tech company names are intentionally NOT weight-3 on their own.
+    # Only product/platform-specific compound phrases carry high weight so that
+    # "Apple Music" or "Amazon Prime" don't route here.
     "ai_tech": [
+        # AI models and pure-AI companies — unambiguous
         ("gpt", 3), ("llm", 3), ("openai", 3), ("chatgpt", 3), ("anthropic", 3),
-        ("claude", 3), ("gemini", 3), ("llama", 3), ("mistral", 3), ("nvidia", 3),
-        ("amd", 3), ("apple", 3), ("google", 3), ("microsoft", 3), ("amazon", 3),
-        ("intel", 3), ("qualcomm", 3),
+        ("claude", 3), ("gemini", 3), ("llama", 3), ("mistral", 3),
+        # Chip/hardware companies — brand = product here
+        ("nvidia", 3), ("amd", 3), ("intel", 3), ("qualcomm", 3),
+        # Big tech: only contextual compound phrases
+        ("apple intelligence", 3), ("apple silicon", 3), ("apple wwdc", 3),
+        ("google deepmind", 3), ("google cloud", 3), ("google gemini", 3),
+        ("amazon aws", 3), ("aws", 3),
+        ("microsoft azure", 3), ("microsoft copilot", 3), ("azure", 3),
+        # Developer & infra phrases
         ("machine learning", 2), ("deep learning", 2), ("neural network", 2),
         ("artificial intelligence", 2), ("open source", 2), ("software engineer", 2),
         ("data science", 2), ("semiconductor", 2), ("large language model", 2),
+        ("cloud computing", 2), ("developer api", 2), ("ios", 2), ("app store", 2),
+        # Weak generic signals
         ("ai", 1), ("tech", 1), ("code", 1), ("coding", 1), ("python", 1),
         ("javascript", 1), ("rust", 1), ("linux", 1), ("software", 1), ("hardware", 1),
     ],
-    "security_risk": [
+    # ── Cybersecurity ─────────────────────────────────────────────────────────
+    # NSA/CIA/FBI downgraded to weight-1: they generate political surveillance
+    # discourse that is not cyber threat intel.
+    "cybersecurity": [
         ("ransomware", 3), ("malware", 3), ("cve", 3), ("zero-day", 3),
-        ("nsa", 3), ("cia", 3), ("fbi", 3),
+        ("cyber command", 3), ("cisa advisory", 3), ("cisa kev", 3),
         ("cybersecurity", 2), ("vulnerability", 2), ("data breach", 2),
-        ("encryption", 2), ("surveillance", 2), ("phishing", 2), ("exploit", 2),
-        ("identity theft", 2), ("two-factor", 2),
+        ("encryption", 2), ("phishing", 2), ("exploit", 2),
+        ("identity theft", 2), ("two-factor", 2), ("threat actor", 2),
+        ("threat intelligence", 2), ("incident response", 2), ("infosec", 2),
+        ("opsec", 2), ("pen test", 2), ("network security", 2), ("surveillance", 2),
+        ("nsa", 1), ("fbi", 1), ("cia", 1),
         ("hack", 1), ("security", 1), ("breach", 1), ("scam", 1), ("leak", 1), ("privacy", 1),
     ],
-    "politics_government": [
+    # ── U.S. Politics ─────────────────────────────────────────────────────────
+    "us_politics": [
         ("congress", 3), ("senate", 3), ("supreme court", 3), ("white house", 3),
         ("trump", 3), ("biden", 3), ("democrat", 3), ("republican", 3), ("gop", 3),
-        ("doj", 3), ("dhs", 3), ("fec", 3),
+        ("doj", 3), ("dhs", 3), ("fec", 3), ("potus", 3),
+        ("house of representatives", 3), ("midterms", 3),
         ("election", 2), ("legislation", 2), ("regulation", 2), ("campaign", 2),
         ("voting rights", 2), ("executive order", 2), ("filibuster", 2), ("impeach", 2),
-        ("maga", 2), ("liberal", 2), ("conservative", 2), ("parliament", 2),
-        ("premier", 2), ("minister", 2), ("monarchy", 2), ("senate bill", 2),
+        ("maga", 2), ("liberal", 2), ("conservative", 2),
+        ("senate bill", 2), ("house bill", 2), ("federal budget", 2),
+        ("parliament", 2), ("premier", 2), ("minister", 2), ("monarchy", 2),
         ("politics", 1), ("policy", 1), ("vote", 1), ("law", 1), ("government", 1), ("president", 1),
     ],
-    "world_news": [
+    # ── War & Diplomacy ───────────────────────────────────────────────────────
+    # Removed "breaking", "world", "global", "international" — too spammy.
+    "war_diplomacy": [
         ("ukraine", 3), ("russia", 3), ("israel", 3), ("gaza", 3), ("china", 3),
         ("taiwan", 3), ("nato", 3), ("united nations", 3), ("idf", 3), ("hamas", 3),
-        ("iran", 3), ("north korea", 3),
+        ("iran", 3), ("north korea", 3), ("kremlin", 3), ("zelensky", 3),
+        ("hezbollah", 3), ("west bank", 3),
         ("war", 2), ("conflict", 2), ("ceasefire", 2), ("sanctions", 2),
         ("diplomacy", 2), ("humanitarian", 2), ("refugee", 2),
-        ("breaking", 1), ("global", 1), ("international", 1), ("world", 1),
+        ("airstrike", 2), ("occupation", 2), ("peace talks", 2), ("arms embargo", 2),
     ],
-    "science_health": [
-        ("nasa", 3), ("crispr", 3), ("fda", 3), ("cdc", 3), ("nih", 3),
-        ("spacex", 3), ("arxiv", 3),
-        ("climate change", 2), ("mental health", 2), ("vaccine", 2), ("pandemic", 2),
-        ("clinical trial", 2), ("space exploration", 2), ("astronomy", 2), ("genomics", 2),
-        ("electric vehicle", 2), ("heat wave", 2), ("wet bulb", 2),
+    # ── Climate & Weather ─────────────────────────────────────────────────────
+    "climate_weather": [
+        ("noaa", 3), ("ipcc", 3),
+        ("hurricane", 3), ("tornado", 3), ("wildfire", 3),
+        ("climate change", 2), ("heat wave", 2), ("wet bulb", 2),
         ("carbon emissions", 2), ("renewable energy", 2), ("climate crisis", 2),
-        ("zev", 2),
-        ("science", 1), ("health", 1), ("medicine", 1), ("study", 1),
-        ("discovery", 1), ("space", 1), ("climate", 1), ("biology", 1),
-        ("weather", 1), ("forecast", 1),
+        ("electric vehicle", 2), ("zev", 2), ("solar energy", 2), ("wind energy", 2),
+        ("greenhouse gas", 2), ("net zero", 2), ("climate strike", 2),
+        ("flash flood", 2), ("severe weather", 2),
+        ("weather", 1), ("forecast", 1), ("storm", 1), ("drought", 1), ("climate", 1),
+        ("flood", 1), ("emissions", 1),
     ],
-    "economy_markets": [
+    # ── Science & Space ───────────────────────────────────────────────────────
+    "science_space": [
+        ("nasa", 3), ("spacex", 3), ("arxiv", 3), ("crispr", 3),
+        ("james webb", 3), ("hubble", 3), ("esa", 3),
+        ("space exploration", 2), ("astronomy", 2), ("genomics", 2),
+        ("rocket launch", 2), ("exoplanet", 2), ("black hole", 2),
+        ("particle physics", 2), ("quantum computing", 2), ("materials science", 2),
+        ("science", 1), ("space", 1), ("biology", 1), ("physics", 1),
+        ("discovery", 1), ("research", 1), ("study", 1),
+    ],
+    # ── Health & Medicine ─────────────────────────────────────────────────────
+    # "who" intentionally omitted — too common an English word.
+    "health_medicine": [
+        ("fda", 3), ("cdc", 3), ("nih", 3), ("world health organization", 3),
+        ("vaccine", 2), ("pandemic", 2), ("clinical trial", 2),
+        ("mental health", 2), ("public health", 2), ("outbreak", 2),
+        ("drug approval", 2), ("health insurance", 2), ("medicaid", 2), ("medicare", 2),
+        ("opioid", 2), ("antibiotic", 2), ("pathogen", 2),
+        ("health", 1), ("medicine", 1), ("hospital", 1), ("doctor", 1),
+        ("treatment", 1), ("diagnosis", 1),
+    ],
+    # ── Money & Markets ───────────────────────────────────────────────────────
+    "money_markets": [
         ("bitcoin", 3), ("ethereum", 3), ("federal reserve", 3), ("wall street", 3),
         ("nasdaq", 3), ("s&p 500", 3), ("imf", 3), ("sec", 3),
         ("stock market", 2), ("interest rate", 2), ("cryptocurrency", 2),
         ("inflation", 2), ("recession", 2), ("gdp", 2), ("tariff", 2),
         ("venture capital", 2), ("ipo", 2), ("defi", 2), ("hedge fund", 2),
+        ("bond yield", 2), ("earnings report", 2), ("trade deficit", 2),
         ("economy", 1), ("market", 1), ("crypto", 1), ("finance", 1),
         ("money", 1), ("investment", 1), ("stocks", 1),
     ],
-    "platform_media": [
-        ("bluesky", 3), ("twitter", 3), ("tiktok", 3), ("instagram", 3),
-        ("youtube", 3), ("facebook", 3), ("threads", 3), ("mastodon", 3),
-        ("substack", 3), ("reddit", 3), ("linkedin", 3),
-        ("social media", 2), ("content moderation", 2), ("algorithm", 2),
+    # ── Social Platforms ──────────────────────────────────────────────────────
+    # Standalone platform names (youtube, tiktok, reddit…) are weight-1 so that
+    # bare link-sharing posts don't override domain boosts that route them to
+    # entertainment_fandom. Compound governance phrases are weight-3.
+    "social_platforms": [
+        ("content moderation", 3), ("platform ban", 3), ("deplatform", 3),
+        ("tiktok ban", 3), ("tiktok bytedance", 3), ("tiktok algorithm", 3),
+        ("youtube algorithm", 3), ("youtube demonetize", 3), ("youtube copyright", 3),
+        ("reddit api", 3), ("subreddit ban", 3), ("reddit ipo", 3),
+        ("activitypub", 3), ("fediverse", 3),
         ("disinformation", 2), ("misinformation", 2), ("journalism", 2),
-        ("newsletter", 2), ("podcast", 2),
-        ("fediverse", 2), ("activitypub", 2), ("self-hosted", 2),
+        ("algorithm", 2), ("social media", 2), ("newsletter", 2), ("podcast", 2),
+        ("self-hosted", 2), ("open web", 2), ("platform policy", 2),
+        ("demonetize", 2), ("free speech", 2), ("censorship", 2),
+        ("mastodon", 2), ("twitter", 2),
         ("platform", 1), ("media", 1), ("viral", 1), ("rss", 1), ("blog", 1),
+        ("bluesky", 1), ("tiktok", 1), ("instagram", 1), ("youtube", 1),
+        ("facebook", 1), ("reddit", 1), ("substack", 1), ("linkedin", 1),
     ],
-    "culture_creators": [
+    # ── Sports ────────────────────────────────────────────────────────────────
+    "sports": [
+        ("nfl", 3), ("nba", 3), ("nhl", 3), ("mlb", 3), ("nascar", 3),
+        ("fifa", 3), ("uefa", 3), ("wimbledon", 3), ("aew", 3), ("usmnt", 3),
+        ("premier league", 3), ("champions league", 3), ("bundesliga", 3),
+        ("la liga", 3), ("serie a", 3),
+        ("super bowl", 2), ("world cup", 2), ("transfer window", 2),
+        ("match day", 2), ("fantasy football", 2), ("fantasy sports", 2),
+        ("playoffs", 2), ("championship", 2),
+        ("formula 1", 2), ("motorsport", 2), ("racing", 2),
+        ("football", 1), ("soccer", 1), ("tennis", 1), ("basketball", 1),
+        ("baseball", 1), ("cricket", 1), ("rugby", 1), ("golf", 1),
+        ("athletics", 1), ("cycling", 1),
+    ],
+    # ── Entertainment & Fandom ────────────────────────────────────────────────
+    "entertainment_fandom": [
         ("netflix", 3), ("disney", 3), ("marvel", 3), ("spotify", 3),
         ("twitch", 3), ("steam", 3), ("playstation", 3), ("xbox", 3),
         ("nintendo", 3), ("patreon", 3),
@@ -130,95 +202,100 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
         ("artist", 1), ("band", 1), ("trailer", 1), ("concert", 1), ("manga", 1),
         ("radio", 1),
     ],
-    "social_movements": [
+    # ── Activism & Rights ─────────────────────────────────────────────────────
+    # abortion raised to weight-3; union/strike/trans rights added.
+    "activism_rights": [
         ("lgbtq", 3), ("blm", 3), ("metoo", 3), ("aclu", 3),
+        ("trans rights", 3), ("labor strike", 3), ("climate strike", 3),
+        ("abortion", 3),
         ("civil rights", 2), ("climate justice", 2), ("feminism", 2),
         ("racism", 2), ("discrimination", 2), ("immigration", 2),
-        ("abortion", 2), ("inequality", 2), ("protest", 2), ("activism", 2),
+        ("inequality", 2), ("protest", 2), ("activism", 2),
+        ("union", 2), ("strike", 2), ("workers rights", 2),
+        ("human rights", 2), ("reproductive rights", 2),
         ("movement", 1), ("justice", 1), ("rights", 1), ("solidarity", 1),
         ("diversity", 1), ("inclusion", 1),
-    ],
-    "sports": [
-        ("nfl", 3), ("nba", 3), ("nhl", 3), ("mlb", 3), ("nascar", 3),
-        ("fifa", 3), ("uefa", 3), ("wimbledon", 3), ("aew", 3), ("usmnt", 3),
-        ("premier league", 3), ("champions league", 3), ("bundesliga", 3),
-        ("la liga", 3), ("serie a", 3),
-        ("super bowl", 2), ("world cup", 2), ("transfer window", 2),
-        ("match day", 2), ("fantasy football", 2), ("fantasy sports", 2),
-        ("playoffs", 2), ("championship", 2),
-        ("formula 1", 2), ("motorsport", 2), ("racing", 2),
-        ("football", 1), ("soccer", 1), ("tennis", 1), ("basketball", 1),
-        ("baseball", 1), ("cricket", 1), ("rugby", 1), ("golf", 1),
-        ("athletics", 1), ("cycling", 1),
     ],
 }
 
 # Domain → (channel, boost_weight). Exact netloc match after stripping www.
 _DOMAIN_BOOSTS: Dict[str, Tuple[str, float]] = {
-    "apnews.com":                ("world_news",           3),
-    "bbc.com":                   ("world_news",           2),
-    "reuters.com":               ("world_news",           2),
-    "theguardian.com":           ("world_news",           2),
-    "nytimes.com":               ("world_news",           2),
-    "aljazeera.com":             ("world_news",           2),
-    "smh.com.au":                ("world_news",           2),
-    "abc.net.au":                ("world_news",           2),
-    "abc7.com":                  ("world_news",           1),   # local US — weak signal only
-    "nation.cymru":              ("world_news",           2),
-    "washingtonpost.com":        ("politics_government",  2),
-    "politico.com":              ("politics_government",  3),
-    "thehill.com":               ("politics_government",  2),
-    "salon.com":                 ("politics_government",  2),
-    "laprogressive.com":         ("politics_government",  2),
-    "krebsonsecurity.com":       ("security_risk",        3),
-    "theregister.com":           ("security_risk",        2),
-    "wired.com":                 ("security_risk",        1),
-    "arxiv.org":                 ("science_health",       3),
-    "nature.com":                ("science_health",       3),
-    "science.org":               ("science_health",       3),
-    "pubmed.ncbi.nlm.nih.gov":   ("science_health",       3),
-    "nasa.gov":                  ("science_health",       3),
-    "mesonet.agron.iastate.edu": ("science_health",       2),
-    "thedrive.com":              ("science_health",       1),
-    "coindesk.com":              ("economy_markets",      3),
-    "bloomberg.com":             ("economy_markets",      2),
-    "wsj.com":                   ("economy_markets",      2),
-    "ft.com":                    ("economy_markets",      2),
+    # War & diplomacy news sources
+    "apnews.com":                ("war_diplomacy",        3),
+    "bbc.com":                   ("war_diplomacy",        2),
+    "reuters.com":               ("war_diplomacy",        2),
+    "theguardian.com":           ("war_diplomacy",        2),
+    "nytimes.com":               ("war_diplomacy",        2),
+    "aljazeera.com":             ("war_diplomacy",        3),
+    "smh.com.au":                ("war_diplomacy",        2),
+    "abc.net.au":                ("war_diplomacy",        2),
+    "abc7.com":                  ("war_diplomacy",        1),
+    "nation.cymru":              ("war_diplomacy",        2),
+    "bbc.co.uk":                 ("war_diplomacy",        2),
+    "europesays.com":            ("war_diplomacy",        1),
+    "msn.com":                   ("war_diplomacy",        1),
+    # U.S. politics sources
+    "washingtonpost.com":        ("us_politics",          2),
+    "politico.com":              ("us_politics",          3),
+    "thehill.com":               ("us_politics",          2),
+    "salon.com":                 ("us_politics",          2),
+    "laprogressive.com":         ("us_politics",          2),
+    # Cybersecurity sources
+    "krebsonsecurity.com":       ("cybersecurity",        3),
+    "theregister.com":           ("cybersecurity",        2),
+    "wired.com":                 ("cybersecurity",        1),
+    # Science & space sources
+    "arxiv.org":                 ("science_space",        3),
+    "nature.com":                ("science_space",        3),
+    "science.org":               ("science_space",        3),
+    "nasa.gov":                  ("science_space",        3),
+    # Health & medicine sources
+    "pubmed.ncbi.nlm.nih.gov":   ("health_medicine",      3),
+    # Climate & weather sources
+    "spc.noaa.gov":              ("climate_weather",      3),
+    "weather.gov":               ("climate_weather",      2),
+    "wpc.ncep.noaa.gov":         ("climate_weather",      2),
+    "mesonet.agron.iastate.edu": ("climate_weather",      2),
+    # Money & markets sources
+    "coindesk.com":              ("money_markets",        3),
+    "bloomberg.com":             ("money_markets",        2),
+    "wsj.com":                   ("money_markets",        2),
+    "ft.com":                    ("money_markets",        2),
+    # AI & tech sources
     "github.com":                ("ai_tech",              2),
     "techcrunch.com":            ("ai_tech",              2),
     "arstechnica.com":           ("ai_tech",              2),
-    "youtu.be":                  ("culture_creators",     2),
-    "youtube.com":               ("culture_creators",     2),
-    "open.spotify.com":          ("culture_creators",     2),
-    "ign.com":                   ("culture_creators",     3),
-    "variety.com":               ("culture_creators",     2),
-    "rollingstone.com":          ("culture_creators",     2),
-    "berlinartlink.com":         ("culture_creators",     2),
-    "niemanlab.org":             ("platform_media",       2),
-    "poynter.org":               ("platform_media",       2),
-    "bbc.co.uk":                 ("world_news",           2),
-    "spc.noaa.gov":              ("science_health",       2),
-    "weather.gov":               ("science_health",       2),
-    "wpc.ncep.noaa.gov":         ("science_health",       2),
-    "europesays.com":            ("world_news",           1),
-    "msn.com":                   ("world_news",           1),
-    "ko-fi.com":                 ("culture_creators",     2),
+    "thedrive.com":              ("ai_tech",              1),
+    # Entertainment & fandom sources
+    "youtu.be":                  ("entertainment_fandom", 2),
+    "youtube.com":               ("entertainment_fandom", 2),
+    "open.spotify.com":          ("entertainment_fandom", 2),
+    "ign.com":                   ("entertainment_fandom", 3),
+    "variety.com":               ("entertainment_fandom", 2),
+    "rollingstone.com":          ("entertainment_fandom", 2),
+    "berlinartlink.com":         ("entertainment_fandom", 2),
+    "ko-fi.com":                 ("entertainment_fandom", 2),
+    "artfight.net":              ("entertainment_fandom", 3),
+    "archiveofourown.org":       ("entertainment_fandom", 3),
+    "store.steampowered.com":    ("entertainment_fandom", 3),
+    # Social platforms sources (journalism/media orgs)
+    "niemanlab.org":             ("social_platforms",     2),
+    "poynter.org":               ("social_platforms",     2),
+    # Sports sources
     "transfermarkt.com":         ("sports",               3),
-    "artfight.net":              ("culture_creators",     3),
-    "archiveofourown.org":       ("culture_creators",     3),
-    "store.steampowered.com":    ("culture_creators",     3),
 }
 
 # Priority order for tie-breaking. "general" is the catch-all, always last.
 _PRIORITY: List[str] = [
-    "ai_tech", "security_risk", "politics_government", "world_news",
-    "science_health", "economy_markets", "platform_media",
-    "sports", "culture_creators", "social_movements", "general",
+    "cybersecurity", "ai_tech", "war_diplomacy", "us_politics",
+    "activism_rights", "climate_weather", "health_medicine", "science_space",
+    "money_markets", "social_platforms", "sports", "entertainment_fandom",
+    "general",
 ]
 
 # Keywords where left-boundary match only so inflected forms match:
 # hack → hacked/hacking, breach → breached, exploit → exploiting, etc.
-_PREFIX_ROOTS: frozenset = frozenset({"hack", "breach", "exploit", "leak", "protest", "artfight"})
+_PREFIX_ROOTS: frozenset = frozenset({"hack", "breach", "exploit", "leak", "protest", "artfight", "strike", "union"})
 
 # Hashtag keyword scoring multiplier — hashtags are intentional signals,
 # slightly higher weight than incidental body text matches.

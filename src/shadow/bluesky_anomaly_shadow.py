@@ -74,9 +74,9 @@ _SUMMARY_PATH = _ANOMALY_DIR / "anomaly_summary_latest.json"
 # ---------------------------------------------------------------------------
 
 BSKY_CHANNELS = [
-    "ai_tech", "security_risk", "politics_government", "world_news",
-    "science_health", "economy_markets", "platform_media",
-    "sports", "culture_creators", "social_movements",
+    "cybersecurity", "ai_tech", "war_diplomacy", "us_politics",
+    "activism_rights", "climate_weather", "health_medicine", "science_space",
+    "money_markets", "social_platforms", "sports", "entertainment_fandom",
 ]
 
 # ---------------------------------------------------------------------------
