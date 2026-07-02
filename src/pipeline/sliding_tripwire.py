@@ -35,10 +35,26 @@ class SlidingWindowTripwire:
     MIN_COUNT         = 10   # ignore windows with fewer than 10 items (low-volume noise)
     VOLATILE_SUBS: Set[str] = {"news", "worldnews"}
 
-    def __init__(self, state: StateManager, subreddits: List[str]) -> None:
+    def __init__(
+        self,
+        state:       StateManager,
+        subreddits:  List[str],
+        *,
+        min_history: Optional[int]   = None,
+        z_threshold: Optional[float] = None,
+        window_ttl:  Optional[int]   = None,
+    ) -> None:
         self.state      = state
         self.subreddits = subreddits
-        self._elevated: Dict[str, bool] = {}   # per-subreddit Schmitt trigger state
+        self._elevated:  Dict[str, bool] = {}
+        self._last_eval: Dict[str, dict] = {}
+        # Per-instance overrides — use is-not-None so 0 / 0.0 are valid values.
+        # Class constants remain unchanged so HN production is unaffected.
+        if min_history is not None:
+            self.MIN_HISTORY = min_history
+        if z_threshold is not None:
+            self.Z_THRESHOLD = z_threshold
+        self.window_ttl = window_ttl if window_ttl is not None else 7200
 
     def ingest(self, comment: Comment) -> None:
         self.state.ingest(comment)
@@ -116,18 +132,28 @@ class SlidingWindowTripwire:
 
             z_score, mean_val, std_val = result
 
+            self._last_eval[sub] = {
+                "count":    count,
+                "z_score":  round(z_score, 2),
+                "mean":     round(mean_val, 2),
+                "std":      round(std_val, 2),
+                "elevated": elevated,
+            }
+
             if not elevated and z_score >= self.Z_THRESHOLD:
                 self._elevated[sub] = True
+                self._last_eval[sub]["elevated"] = True
                 elevated = True
             elif elevated and z_score <= self.RELEASE_THRESHOLD:
                 self._elevated[sub] = False
+                self._last_eval[sub]["elevated"] = False
                 elevated = False
 
             if elevated:
                 items = self.state.get_window_items(sub, now)
                 events.append(AnomalyEvent(
                     subreddit=sub,
-                    window_start=now - 7200,
+                    window_start=now - self.window_ttl,
                     window_end=now,
                     count=count,
                     z_score=round(z_score, 2),
@@ -137,3 +163,7 @@ class SlidingWindowTripwire:
                 ))
 
         return events
+
+    def channel_stats(self) -> Dict[str, dict]:
+        """Return last-evaluation stats (z, mean, std, count, elevated) per channel."""
+        return dict(self._last_eval)

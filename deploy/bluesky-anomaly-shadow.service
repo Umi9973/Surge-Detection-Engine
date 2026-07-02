@@ -1,0 +1,23 @@
+[Unit]
+Description=Bluesky Anomaly Shadow Runner — anomaly detection only, no production output
+After=network-online.target redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stevenc9973
+WorkingDirectory=/home/stevenc9973/Surge-Detection-Engine
+Environment=PYTHONPATH=/home/stevenc9973/Surge-Detection-Engine
+Environment=BSKY_MIN_HISTORY=6
+Environment=BSKY_Z_THRESHOLD=3.0
+Environment=BSKY_WINDOW_TTL=3600
+Environment=BSKY_EVAL_INTERVAL=300
+Environment=BSKY_BASELINE_INTERVAL=3600
+ExecStart=/usr/bin/python3 src/shadow/bluesky_anomaly_shadow.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
