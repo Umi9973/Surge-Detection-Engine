@@ -147,18 +147,25 @@ def _fire_ticks(
 
         if e <= b:
             raw_events = tripwire.evaluation_tick(e)
-            # AlertGate: in-memory cooldown only — no dispatcher, no Redis, no webhooks
-            events = gate.process(raw_events)
-            for ev in events:
-                fired_at = datetime.now(timezone.utc).isoformat()
-                sample_texts = [
-                    it.get("text", "")[:150]
-                    for it in (ev.items or [])[:3]
-                ]
+
+            # Split by event phase before gating.
+            starts   = [ev for ev in raw_events if ev.event_type == "start"]
+            updates  = [ev for ev in raw_events if ev.event_type == "update"]
+            releases = [ev for ev in raw_events if ev.event_type == "release"]
+
+            # Only start events go through AlertGate (cooldown for notifications).
+            gated_starts = gate.process(starts)
+
+            # ── start events: new distinct surge begins ────────────────────────
+            for ev in gated_starts:
+                fired_at     = datetime.now(timezone.utc).isoformat()
+                sample_texts = [it.get("text", "")[:150] for it in (ev.items or [])[:3]]
                 entry = {
                     "source":       "bluesky",
+                    "event_type":   "start",
                     "channel":      ev.subreddit,
                     "fired_at":     fired_at,
+                    "event_start":  ev.event_start,
                     "window_start": ev.window_start,
                     "window_end":   ev.window_end,
                     "count":        ev.count,
@@ -170,23 +177,55 @@ def _fire_ticks(
                 fires_by_channel[ev.subreddit] += 1
                 if ev.z_score > max_z_by_channel.get(ev.subreddit, float("-inf")):
                     max_z_by_channel[ev.subreddit] = ev.z_score
-                # Append to JSONL
                 try:
                     with open(anomaly_events_path, "a", encoding="utf-8") as f:
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 except OSError as exc:
                     print(f"[anomaly] event write failed: {exc}",
                           file=sys.stderr, flush=True)
-
                 anomaly_log.append(entry)
                 if len(anomaly_log) > _MAX_ANOMALY_LOG:
                     anomaly_log.pop(0)
                 anomaly_count[0] += 1
                 print(
-                    f"[anomaly] ANOMALY {ev.subreddit}  z={ev.z_score}  "
+                    f"[anomaly] SURGE START  {ev.subreddit}  z={ev.z_score}  "
                     f"count={ev.count}  mean={ev.mean}",
                     flush=True,
                 )
+
+            # ── update events: track peak_z only, no new counter ──────────────
+            for ev in updates:
+                if ev.z_score > max_z_by_channel.get(ev.subreddit, float("-inf")):
+                    max_z_by_channel[ev.subreddit] = ev.z_score
+
+            # ── release events: log duration, no counter increment ─────────────
+            for ev in releases:
+                duration_s = ev.window_end - ev.event_start
+                entry = {
+                    "source":       "bluesky",
+                    "event_type":   "release",
+                    "channel":      ev.subreddit,
+                    "fired_at":     datetime.now(timezone.utc).isoformat(),
+                    "event_start":  ev.event_start,
+                    "window_end":   ev.window_end,
+                    "duration_s":   duration_s,
+                    "z_score":      ev.z_score,
+                    "peak_z":       max_z_by_channel.get(ev.subreddit),
+                    "mean":         ev.mean,
+                    "std":          ev.std,
+                }
+                try:
+                    with open(anomaly_events_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                except OSError as exc:
+                    print(f"[anomaly] event write failed: {exc}",
+                          file=sys.stderr, flush=True)
+                print(
+                    f"[anomaly] SURGE END    {ev.subreddit}  duration={duration_s//60}min  "
+                    f"peak_z={max_z_by_channel.get(ev.subreddit)}",
+                    flush=True,
+                )
+
             eval_count[0] += 1
             ticks["eval"] = e + _EVAL_INTERVAL
 

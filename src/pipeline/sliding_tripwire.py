@@ -46,8 +46,9 @@ class SlidingWindowTripwire:
     ) -> None:
         self.state      = state
         self.subreddits = subreddits
-        self._elevated:  Dict[str, bool] = {}
-        self._last_eval: Dict[str, dict] = {}
+        self._elevated:       Dict[str, bool] = {}
+        self._last_eval:      Dict[str, dict] = {}
+        self._elevation_start: Dict[str, int]  = {}  # sub → unix ts when ELEVATED began
         # Per-instance overrides — use is-not-None so 0 / 0.0 are valid values.
         # Class constants remain unchanged so HN production is unaffected.
         if min_history is not None:
@@ -111,8 +112,11 @@ class SlidingWindowTripwire:
           - Stays ELEVATED while Z > RELEASE_THRESHOLD (2.0)
           - Exits ELEVATED when Z ≤ RELEASE_THRESHOLD (2.0)
 
-        No cooldown logic here — every event while ELEVATED is returned.
-        Cooldown for user notifications is applied downstream by AlertGate.
+        Event lifecycle per channel:
+          event_type="start"   — channel just crossed Z_THRESHOLD (new distinct surge)
+          event_type="update"  — channel still ELEVATED (heartbeat, no counter increment)
+          event_type="release" — channel dropped below RELEASE_THRESHOLD (surge ended)
+        Only "start" events should be counted as new anomalies downstream.
         """
         events: List[AnomalyEvent] = []
 
@@ -132,6 +136,19 @@ class SlidingWindowTripwire:
 
             z_score, mean_val, std_val = result
 
+            just_entered  = False
+            just_released = False
+
+            if not elevated and z_score >= self.Z_THRESHOLD:
+                self._elevated[sub] = True
+                self._elevation_start[sub] = now
+                elevated     = True
+                just_entered = True
+            elif elevated and z_score <= self.RELEASE_THRESHOLD:
+                self._elevated[sub] = False
+                elevated      = False
+                just_released = True
+
             self._last_eval[sub] = {
                 "count":    count,
                 "z_score":  round(z_score, 2),
@@ -140,17 +157,10 @@ class SlidingWindowTripwire:
                 "elevated": elevated,
             }
 
-            if not elevated and z_score >= self.Z_THRESHOLD:
-                self._elevated[sub] = True
-                self._last_eval[sub]["elevated"] = True
-                elevated = True
-            elif elevated and z_score <= self.RELEASE_THRESHOLD:
-                self._elevated[sub] = False
-                self._last_eval[sub]["elevated"] = False
-                elevated = False
-
             if elevated:
-                items = self.state.get_window_items(sub, now)
+                # Fetch sample items only on entry — saves Redis calls on updates.
+                items      = self.state.get_window_items(sub, now) if just_entered else []
+                event_type = "start" if just_entered else "update"
                 events.append(AnomalyEvent(
                     subreddit=sub,
                     window_start=now - self.window_ttl,
@@ -160,6 +170,21 @@ class SlidingWindowTripwire:
                     items=items,
                     mean=round(mean_val, 2),
                     std=round(std_val, 2),
+                    event_type=event_type,
+                    event_start=self._elevation_start.get(sub, now),
+                ))
+            elif just_released:
+                events.append(AnomalyEvent(
+                    subreddit=sub,
+                    window_start=now - self.window_ttl,
+                    window_end=now,
+                    count=count,
+                    z_score=round(z_score, 2),
+                    items=[],
+                    mean=round(mean_val, 2),
+                    std=round(std_val, 2),
+                    event_type="release",
+                    event_start=self._elevation_start.pop(sub, now),
                 ))
 
         return events

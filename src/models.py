@@ -30,3 +30,5 @@ class AnomalyEvent:
     items:        List[Dict] = field(default_factory=list)  # {item_id, text, story_id, story_title, domain, item_type, created_at}
     mean:         float = 0.0
     std:          float = 0.0
+    event_type:   str   = "start"   # "start" | "update" | "release"
+    event_start:  int   = 0         # unix ts when this elevation period began
