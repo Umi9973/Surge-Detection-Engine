@@ -21,11 +21,16 @@ Before a clean experiment:
 
 Outputs:
     data/debug/bluesky/anomaly/anomaly_summary_latest.json   — overwritten every 5 min
-    data/debug/bluesky/anomaly/anomaly_events_{run_ts}.jsonl — appended as anomalies fire
+    data/debug/bluesky/anomaly/anomaly_events_{run_ts}.jsonl — one record per completed event
 
 GCS uploads (every 5 min):
     shadow/bluesky/anomaly/anomaly_summary_latest.json
     shadow/bluesky/anomaly/anomaly_events_{run_ts}.jsonl
+
+Event grouping model:
+    start  → opens an _active_events record; fires_by_channel / anomaly_count increment
+    update → accumulates peak_z, peak_count, update_count into the active record; no JSONL write
+    release→ finalises the active record and writes ONE rich JSONL line with full lifecycle data
 
 NOTE: Stats here will not exactly match bluesky_shadow.py because this process opens
 its own independent Jetstream WebSocket connection (two separate samples).
@@ -58,7 +63,7 @@ _GCS_PROJECT       = os.environ.get("GCS_PROJECT", "project-8299dfb6-57e5-4dcf-b
 _GCS_PREFIX        = "shadow/bluesky/anomaly"
 
 _SUMMARY_INTERVAL  = 300   # write/upload summary every 5 min
-_MAX_ANOMALY_LOG   = 50    # keep last N anomaly events in the summary
+_MAX_ANOMALY_LOG   = 50    # keep last N completed events in the summary
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -134,9 +139,10 @@ def _fire_ticks(
     kept_by_channel:  Counter,
     fires_by_channel: Counter,
     max_z_by_channel: dict,
+    active_events:    Dict,       # keyed by channel; accumulates state across start→release
     anomaly_log:      List,
     anomaly_events_path: Path,
-    eval_count:       list,   # [int] — mutable counter
+    eval_count:       list,       # [int] — mutable counter
     base_count:       list,
     anomaly_count:    list,
 ) -> None:
@@ -156,27 +162,81 @@ def _fire_ticks(
             # Only start events go through AlertGate (cooldown for notifications).
             gated_starts = gate.process(starts)
 
-            # ── start events: new distinct surge begins ────────────────────────
+            # ── start: open an in-memory event record ─────────────────────────
             for ev in gated_starts:
-                fired_at     = datetime.now(timezone.utc).isoformat()
                 sample_texts = [it.get("text", "")[:150] for it in (ev.items or [])[:3]]
-                entry = {
+                active_events[ev.subreddit] = {
+                    "event_id":     f"bluesky-{ev.subreddit}-{ev.event_start}",
                     "source":       "bluesky",
-                    "event_type":   "start",
                     "channel":      ev.subreddit,
-                    "fired_at":     fired_at,
                     "event_start":  ev.event_start,
-                    "window_start": ev.window_start,
-                    "window_end":   ev.window_end,
-                    "count":        ev.count,
-                    "z_score":      ev.z_score,
+                    "first_seen":   e,
+                    "last_seen":    e,
+                    "opening_z":    ev.z_score,
+                    "peak_z":       ev.z_score,
+                    "peak_count":   ev.count,
                     "mean":         ev.mean,
                     "std":          ev.std,
+                    "update_count": 0,
                     "sample_texts": sample_texts,
                 }
                 fires_by_channel[ev.subreddit] += 1
                 if ev.z_score > max_z_by_channel.get(ev.subreddit, float("-inf")):
                     max_z_by_channel[ev.subreddit] = ev.z_score
+                anomaly_count[0] += 1
+                print(
+                    f"[anomaly] SURGE START  {ev.subreddit}  z={ev.z_score}  "
+                    f"count={ev.count}  mean={ev.mean}",
+                    flush=True,
+                )
+
+            # ── update: accumulate peak state into existing record ─────────────
+            for ev in updates:
+                if ev.z_score > max_z_by_channel.get(ev.subreddit, float("-inf")):
+                    max_z_by_channel[ev.subreddit] = ev.z_score
+                rec = active_events.get(ev.subreddit)
+                if rec is not None:
+                    rec["last_seen"]    = e
+                    rec["update_count"] += 1
+                    if ev.z_score > rec["peak_z"]:
+                        rec["peak_z"] = ev.z_score
+                    if ev.count > rec["peak_count"]:
+                        rec["peak_count"] = ev.count
+
+            # ── release: finalise and write ONE rich record to JSONL ───────────
+            for ev in releases:
+                rec = active_events.pop(ev.subreddit, None)
+                if rec is None:
+                    # Process restarted mid-surge — no start record in memory.
+                    rec = {
+                        "event_id":     f"bluesky-{ev.subreddit}-{ev.event_start}",
+                        "source":       "bluesky",
+                        "channel":      ev.subreddit,
+                        "event_start":  ev.event_start,
+                        "first_seen":   ev.event_start,
+                        "last_seen":    e,
+                        "opening_z":    None,
+                        "peak_z":       ev.z_score,
+                        "peak_count":   ev.count,
+                        "mean":         ev.mean,
+                        "std":          ev.std,
+                        "update_count": 0,
+                        "sample_texts": [],
+                    }
+                # Merge final z/count in case release tick itself is the peak.
+                if ev.z_score > rec["peak_z"]:
+                    rec["peak_z"] = ev.z_score
+                if ev.count > rec["peak_count"]:
+                    rec["peak_count"] = ev.count
+
+                duration_s = e - rec["event_start"]
+                entry = {
+                    **rec,
+                    "released_at": datetime.now(timezone.utc).isoformat(),
+                    "window_end":  e,
+                    "duration_s":  duration_s,
+                    "closing_z":   ev.z_score,
+                }
                 try:
                     with open(anomaly_events_path, "a", encoding="utf-8") as f:
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -186,43 +246,10 @@ def _fire_ticks(
                 anomaly_log.append(entry)
                 if len(anomaly_log) > _MAX_ANOMALY_LOG:
                     anomaly_log.pop(0)
-                anomaly_count[0] += 1
                 print(
-                    f"[anomaly] SURGE START  {ev.subreddit}  z={ev.z_score}  "
-                    f"count={ev.count}  mean={ev.mean}",
-                    flush=True,
-                )
-
-            # ── update events: track peak_z only, no new counter ──────────────
-            for ev in updates:
-                if ev.z_score > max_z_by_channel.get(ev.subreddit, float("-inf")):
-                    max_z_by_channel[ev.subreddit] = ev.z_score
-
-            # ── release events: log duration, no counter increment ─────────────
-            for ev in releases:
-                duration_s = ev.window_end - ev.event_start
-                entry = {
-                    "source":       "bluesky",
-                    "event_type":   "release",
-                    "channel":      ev.subreddit,
-                    "fired_at":     datetime.now(timezone.utc).isoformat(),
-                    "event_start":  ev.event_start,
-                    "window_end":   ev.window_end,
-                    "duration_s":   duration_s,
-                    "z_score":      ev.z_score,
-                    "peak_z":       max_z_by_channel.get(ev.subreddit),
-                    "mean":         ev.mean,
-                    "std":          ev.std,
-                }
-                try:
-                    with open(anomaly_events_path, "a", encoding="utf-8") as f:
-                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                except OSError as exc:
-                    print(f"[anomaly] event write failed: {exc}",
-                          file=sys.stderr, flush=True)
-                print(
-                    f"[anomaly] SURGE END    {ev.subreddit}  duration={duration_s//60}min  "
-                    f"peak_z={max_z_by_channel.get(ev.subreddit)}",
+                    f"[anomaly] SURGE END    {ev.subreddit}  "
+                    f"duration={duration_s // 60}min  "
+                    f"peak_z={rec['peak_z']}  updates={rec['update_count']}",
                     flush=True,
                 )
 
@@ -245,6 +272,7 @@ def _write_summary(
     kept_by_channel:  Counter,
     fires_by_channel: Counter,
     max_z_by_channel: dict,
+    active_events:    Dict,
     tripwire,
     state,
     eval_count:       list,
@@ -273,6 +301,18 @@ def _write_summary(
             "elevated":     ev.get("elevated", False),
         }
 
+    # Snapshot of in-progress surges (not yet released)
+    active_snapshot = {
+        ch: {
+            "event_id":     rec["event_id"],
+            "event_start":  rec["event_start"],
+            "peak_z":       rec["peak_z"],
+            "peak_count":   rec["peak_count"],
+            "update_count": rec["update_count"],
+        }
+        for ch, rec in active_events.items()
+    }
+
     summary = {
         "source":               "bluesky",
         "started_at":           wall_start,
@@ -282,8 +322,9 @@ def _write_summary(
         "anomalies_fired":      anomaly_count[0],
         "kept_by_channel":      dict(kept_by_channel),
         "channel_stats":        channel_summary,
+        "active_surges":        active_snapshot,
         "updated_at":           datetime.now(timezone.utc).isoformat(),
-        "anomaly_events":       anomaly_log[-_MAX_ANOMALY_LOG:],
+        "completed_events":     anomaly_log[-_MAX_ANOMALY_LOG:],
     }
     tmp = path.with_suffix(".json.tmp")
     try:
@@ -320,7 +361,7 @@ def main() -> None:
         z_threshold=_Z_THRESHOLD,
         window_ttl=_WINDOW_TTL,
     )
-    # AlertGate: in-memory only (r=None) — no Redis, no webhooks, no dispatcher
+    # AlertGate: in-memory only — no Redis, no webhooks, no dispatcher
     gate = AlertGate()
 
     ingestor = BlueskyIngestor()
@@ -331,10 +372,11 @@ def main() -> None:
     start_mono  = time.monotonic()
     anomaly_events_path = _ANOMALY_DIR / f"anomaly_events_{ts}.jsonl"
 
-    kept_by_channel:  Counter      = Counter()
-    fires_by_channel: Counter      = Counter()
-    max_z_by_channel: Dict[str, float] = {}
-    anomaly_log:      List         = []
+    kept_by_channel:  Counter           = Counter()
+    fires_by_channel: Counter           = Counter()
+    max_z_by_channel: Dict[str, float]  = {}
+    active_events:    Dict[str, dict]   = {}   # currently-elevated channels
+    anomaly_log:      List              = []   # completed event records (for summary)
     eval_count    = [0]
     base_count    = [0]
     anomaly_count = [0]
@@ -363,7 +405,7 @@ def main() -> None:
         _fire_ticks(
             now, tripwire, gate, ticks,
             kept_by_channel, fires_by_channel, max_z_by_channel,
-            anomaly_log, anomaly_events_path,
+            active_events, anomaly_log, anomaly_events_path,
             eval_count, base_count, anomaly_count,
         )
 
@@ -373,7 +415,7 @@ def main() -> None:
             _write_summary(
                 _SUMMARY_PATH, wall_start, start_mono,
                 kept_by_channel, fires_by_channel, max_z_by_channel,
-                tripwire, state,
+                active_events, tripwire, state,
                 eval_count, base_count, anomaly_count, anomaly_log,
             )
             last_summary = mono

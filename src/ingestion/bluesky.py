@@ -112,25 +112,31 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
         ("flood", 1), ("emissions", 1),
     ],
     # ── Science & Space ───────────────────────────────────────────────────────
+    # Generic terms (space, research, study, discovery) removed — on Bluesky
+    # "space" almost never means astronomy, and "research/study" cross into
+    # health, politics, and finance. Unambiguous entity names carry the signal.
     "science_space": [
         ("nasa", 3), ("spacex", 3), ("arxiv", 3), ("crispr", 3),
         ("james webb", 3), ("hubble", 3), ("esa", 3),
+        ("pnas", 3), ("biorxiv", 3), ("researchgate", 3),
         ("space exploration", 2), ("astronomy", 2), ("genomics", 2),
         ("rocket launch", 2), ("exoplanet", 2), ("black hole", 2),
         ("particle physics", 2), ("quantum computing", 2), ("materials science", 2),
-        ("science", 1), ("space", 1), ("biology", 1), ("physics", 1),
-        ("discovery", 1), ("research", 1), ("study", 1),
+        ("asteroid", 2), ("telescope", 2), ("galaxy", 2),
+        ("peer review", 2), ("scientific paper", 2),
+        ("science", 1), ("biology", 1), ("physics", 1),
     ],
     # ── Health & Medicine ─────────────────────────────────────────────────────
     # "who" intentionally omitted — too common an English word.
+    # "health", "hospital", "doctor" removed — too generic, captured personal
+    # health chatter. Public-health signal comes from the weight-2/3 terms.
     "health_medicine": [
         ("fda", 3), ("cdc", 3), ("nih", 3), ("world health organization", 3),
         ("vaccine", 2), ("pandemic", 2), ("clinical trial", 2),
         ("mental health", 2), ("public health", 2), ("outbreak", 2),
         ("drug approval", 2), ("health insurance", 2), ("medicaid", 2), ("medicare", 2),
         ("opioid", 2), ("antibiotic", 2), ("pathogen", 2),
-        ("health", 1), ("medicine", 1), ("hospital", 1), ("doctor", 1),
-        ("treatment", 1), ("diagnosis", 1),
+        ("medicine", 1), ("treatment", 1), ("diagnosis", 1),
     ],
     # ── Money & Markets ───────────────────────────────────────────────────────
     "money_markets": [
@@ -145,22 +151,32 @@ _TOPIC_CHANNELS: Dict[str, List[Tuple[str, float]]] = {
     ],
     # ── Social Platforms ──────────────────────────────────────────────────────
     # Standalone platform names (youtube, tiktok, reddit…) are weight-1 so that
-    # bare link-sharing posts don't override domain boosts that route them to
-    # entertainment_fandom. Compound governance phrases are weight-3.
+    # bare link-sharing posts don't route here on name alone. A _MIN_SCORE floor
+    # of 2.0 is enforced at selection time: a post needs at least one weight-2
+    # discourse/incident term alongside any platform mention to be eligible.
     "social_platforms": [
+        # Unambiguous compound phrases — platform governance/incidents
         ("content moderation", 3), ("platform ban", 3), ("deplatform", 3),
         ("tiktok ban", 3), ("tiktok bytedance", 3), ("tiktok algorithm", 3),
         ("youtube algorithm", 3), ("youtube demonetize", 3), ("youtube copyright", 3),
         ("reddit api", 3), ("subreddit ban", 3), ("reddit ipo", 3),
         ("activitypub", 3), ("fediverse", 3),
+        ("copyright strike", 3),
+        # Platform incident / operational terms
+        ("outage", 2), ("api", 2), ("account locked", 2), ("rate limit", 2),
+        ("moderation", 2), ("platform migration", 2), ("demonetized", 2),
+        # Platform discourse / media industry
         ("disinformation", 2), ("misinformation", 2), ("journalism", 2),
         ("algorithm", 2), ("social media", 2), ("newsletter", 2), ("podcast", 2),
         ("self-hosted", 2), ("open web", 2), ("platform policy", 2),
         ("demonetize", 2), ("free speech", 2), ("censorship", 2),
         ("mastodon", 2), ("twitter", 2),
+        # Weak signals — valid only in combination with stronger terms
         ("platform", 1), ("media", 1), ("viral", 1), ("rss", 1), ("blog", 1),
         ("bluesky", 1), ("tiktok", 1), ("instagram", 1), ("youtube", 1),
         ("facebook", 1), ("reddit", 1), ("substack", 1), ("linkedin", 1),
+        ("banned", 1), ("suspended", 1), ("recommendation", 1), ("bots", 1),
+        ("migration", 1),
     ],
     # ── Sports ────────────────────────────────────────────────────────────────
     "sports": [
@@ -292,6 +308,14 @@ _PRIORITY: List[str] = [
     "money_markets", "social_platforms", "sports", "entertainment_fandom",
     "general",
 ]
+
+# Per-channel minimum score required to be selected as winner.
+# Channels not listed here have an implicit floor of 0 (current behaviour).
+# social_platforms: bare platform name mention (weight-1, score=1.0) is not
+# enough — the post must also contain at least one discourse/incident term.
+_MIN_SCORE: Dict[str, float] = {
+    "social_platforms": 2.0,
+}
 
 # Keywords where left-boundary match only so inflected forms match:
 # hack → hacked/hacking, breach → breached, exploit → exploiting, etc.
@@ -473,21 +497,54 @@ class BlueskyTopicRouter:
                 channel_scores[ch]   = channel_scores.get(ch, 0) + boost
                 domain_boost_str     = f"{domain} → {ch}+{int(boost)}"
 
+        _empty_audit = {
+            "raw_channel_scores":        {},
+            "eligible_channel_scores":   {},
+            "failed_min_score_channels": [],
+            "min_score_applied":         False,
+            "drop_reason":               "",
+        }
+
         if not channel_scores:
             return {
                 "channel": "general", "top_score": 0.0,
                 "second_channel": "", "second_score": 0.0, "score_margin": 0.0,
                 "matched_keywords": [], "domain_boost_used": "",
                 "body_score": 0.0, "embed_score": 0.0,
+                **_empty_audit,
             }
 
-        best_score = max(channel_scores.values())
+        # Apply per-channel minimum score floors before winner selection.
+        failed_min_score = [
+            {"channel": ch, "score": round(s, 3), "min_required": _MIN_SCORE[ch]}
+            for ch, s in channel_scores.items()
+            if ch in _MIN_SCORE and s < _MIN_SCORE[ch]
+        ]
+        eligible = {
+            ch: s for ch, s in channel_scores.items()
+            if s >= _MIN_SCORE.get(ch, 0.0)
+        }
+
+        if not eligible:
+            return {
+                "channel": "general", "top_score": 0.0,
+                "second_channel": "", "second_score": 0.0, "score_margin": 0.0,
+                "matched_keywords": [], "domain_boost_used": domain_boost_str,
+                "body_score": 0.0, "embed_score": 0.0,
+                "raw_channel_scores":        {ch: round(s, 3) for ch, s in channel_scores.items()},
+                "eligible_channel_scores":   {},
+                "failed_min_score_channels": failed_min_score,
+                "min_score_applied":         True,
+                "drop_reason":               "below_channel_floor",
+            }
+
+        best_score = max(eligible.values())
         winner = next(
-            (ch for ch in _PRIORITY if channel_scores.get(ch, 0) == best_score),
-            max(channel_scores, key=channel_scores.__getitem__),
+            (ch for ch in _PRIORITY if eligible.get(ch, 0) == best_score),
+            max(eligible, key=eligible.__getitem__),
         )
         others = sorted(
-            [(ch, s) for ch, s in channel_scores.items() if ch != winner],
+            [(ch, s) for ch, s in eligible.items() if ch != winner],
             key=lambda x: -x[1],
         )
         second_ch, second_score = others[0] if others else ("", 0.0)
@@ -502,6 +559,11 @@ class BlueskyTopicRouter:
             "domain_boost_used": domain_boost_str,
             "body_score":        round(body_scores.get(winner, 0), 3),
             "embed_score":       round(embed_scores.get(winner, 0), 3),
+            "raw_channel_scores":        {ch: round(s, 3) for ch, s in channel_scores.items()},
+            "eligible_channel_scores":   {ch: round(s, 3) for ch, s in eligible.items()},
+            "failed_min_score_channels": failed_min_score,
+            "min_score_applied":         bool(failed_min_score),
+            "drop_reason":               "",
         }
 
 
