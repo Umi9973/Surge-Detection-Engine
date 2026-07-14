@@ -77,7 +77,7 @@ class RedisStateManager(StateManager):
 
     def ingest(self, comment: Comment) -> None:
         key    = f"window:{comment.subreddit}"
-        member = f"{uuid4().hex}:{json.dumps({'t': comment.body[:120], 'sid': comment.story_id, 'st': comment.story_title, 'd': comment.domain, 'it': comment.item_type, 'iid': comment.item_id, 'ca': comment.created_at})}"
+        member = f"{uuid4().hex}:{json.dumps({'t': comment.body[:120], 'sid': comment.story_id, 'st': comment.story_title, 'd': comment.domain, 'it': comment.item_type, 'iid': comment.item_id, 'ca': comment.created_at, 'uri': comment.platform_uri, 'ruri': comment.root_uri, 'a': comment.author, 'h': comment.hashtags, 'kw': comment.matched_keywords})}"
         self.r.zadd(key, {member: comment.timestamp})
 
     # --- Window ---
@@ -103,24 +103,34 @@ class RedisStateManager(StateManager):
                 _, payload = m.split(":", 1)
                 d = json.loads(payload)
                 items.append({
-                    "item_id":     d.get("iid", 0),
-                    "text":        d.get("t", ""),
-                    "story_id":    d.get("sid", 0),
-                    "story_title": d.get("st", ""),
-                    "domain":      d.get("d", ""),
-                    "item_type":   d.get("it", ""),
-                    "created_at":  d.get("ca", 0),
+                    "item_id":          d.get("iid",  0),
+                    "text":             d.get("t",    ""),
+                    "story_id":         d.get("sid",  0),
+                    "story_title":      d.get("st",   ""),
+                    "domain":           d.get("d",    ""),
+                    "item_type":        d.get("it",   ""),
+                    "created_at":       d.get("ca",   0),
+                    "platform_uri":     d.get("uri",  ""),
+                    "root_uri":         d.get("ruri", ""),
+                    "author":           d.get("a",    ""),
+                    "hashtags":         d.get("h",    []),
+                    "matched_keywords": d.get("kw",   []),
                 })
             except Exception:
-                # Old plain-text entry or any parse error — degrade gracefully
+                # Old entry or parse error — degrade gracefully
                 items.append({
-                    "item_id":     0,
-                    "text":        m.split(":", 1)[-1] if ":" in m else m,
-                    "story_id":    0,
-                    "story_title": "",
-                    "domain":      "",
-                    "item_type":   "",
-                    "created_at":  0,
+                    "item_id":          0,
+                    "text":             m.split(":", 1)[-1] if ":" in m else m,
+                    "story_id":         0,
+                    "story_title":      "",
+                    "domain":           "",
+                    "item_type":        "",
+                    "created_at":       0,
+                    "platform_uri":     "",
+                    "root_uri":         "",
+                    "author":           "",
+                    "hashtags":         [],
+                    "matched_keywords": [],
                 })
         return items
 

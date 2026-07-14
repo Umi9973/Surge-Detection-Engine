@@ -92,19 +92,53 @@ from src.models import Comment
 
 def _to_comment(raw: Dict) -> Comment:
     return Comment(
-        id          = raw.get("id", ""),
-        subreddit   = raw.get("subreddit", ""),
-        body        = raw.get("body", ""),
-        timestamp   = int(raw.get("timestamp", 0)),
-        author      = raw.get("author", ""),
-        score       = int(raw.get("score", 0)),
-        story_id    = int(raw.get("story_id", 0)),
-        story_title = raw.get("story_title", ""),
-        domain      = raw.get("domain", ""),
-        item_type   = raw.get("item_type", ""),
-        item_id     = int(raw.get("item_id", 0)),
-        created_at  = int(raw.get("created_at", 0)),
+        id               = raw.get("id", ""),
+        subreddit        = raw.get("subreddit", ""),
+        body             = raw.get("body", ""),
+        timestamp        = int(raw.get("timestamp", 0)),
+        author           = raw.get("author_did", "") or raw.get("author", ""),
+        score            = int(raw.get("score", 0)),
+        story_id         = int(raw.get("story_id", 0)),
+        story_title      = raw.get("story_title", ""),
+        domain           = raw.get("domain", ""),
+        item_type        = raw.get("item_type", ""),
+        item_id          = int(raw.get("item_id", 0)),
+        created_at       = int(raw.get("created_at", 0)),
+        platform_uri     = raw.get("platform_item_uri", ""),
+        root_uri         = raw.get("root_uri", ""),
+        hashtags         = raw.get("hashtags", []),
+        matched_keywords = raw.get("routing", {}).get("matched_keywords", []),
     )
+
+# ---------------------------------------------------------------------------
+# Enrichment helper
+# ---------------------------------------------------------------------------
+
+def _enrich_items(items: List[Dict]) -> Dict:
+    kw_counts   = Counter(kw for it in items for kw in it.get("matched_keywords", []))
+    ht_counts   = Counter(ht for it in items for ht in it.get("hashtags", []))
+    dom_counts  = Counter(it.get("domain", "") for it in items if it.get("domain"))
+    auth_counts = Counter(it.get("author", "") for it in items if it.get("author"))
+    posts = [
+        {
+            "text":         it.get("text", "")[:200],
+            "platform_uri": it.get("platform_uri", ""),
+            "root_uri":     it.get("root_uri", ""),
+            "author":       it.get("author", ""),
+            "hashtags":     it.get("hashtags", []),
+            "keywords":     it.get("matched_keywords", []),
+            "domain":       it.get("domain", ""),
+        }
+        for it in items[:5]
+    ]
+    return {
+        "posts":    posts,
+        "keywords": kw_counts.most_common(10),
+        "hashtags": ht_counts.most_common(10),
+        "domains":  dom_counts.most_common(5),
+        "authors":  auth_counts.most_common(5),
+    }
+
 
 # ---------------------------------------------------------------------------
 # GCS upload
@@ -164,7 +198,8 @@ def _fire_ticks(
 
             # ── start: open an in-memory event record ─────────────────────────
             for ev in gated_starts:
-                sample_texts = [it.get("text", "")[:150] for it in (ev.items or [])[:3]]
+                opening      = _enrich_items(ev.items or [])
+                sample_texts = [p["text"][:150] for p in opening["posts"][:3]]
                 active_events[ev.subreddit] = {
                     "event_id":     f"bluesky-{ev.subreddit}-{ev.event_start}",
                     "source":       "bluesky",
@@ -178,6 +213,7 @@ def _fire_ticks(
                     "mean":         ev.mean,
                     "std":          ev.std,
                     "update_count": 0,
+                    "opening":      opening,
                     "sample_texts": sample_texts,
                 }
                 fires_by_channel[ev.subreddit] += 1
@@ -198,10 +234,15 @@ def _fire_ticks(
                 if rec is not None:
                     rec["last_seen"]    = e
                     rec["update_count"] += 1
-                    if ev.z_score > rec["peak_z"]:
+                    new_peak_z     = ev.z_score > rec["peak_z"]
+                    new_peak_count = ev.count   > rec["peak_count"]
+                    if new_peak_z:
                         rec["peak_z"] = ev.z_score
-                    if ev.count > rec["peak_count"]:
+                    if new_peak_count:
                         rec["peak_count"] = ev.count
+                    if new_peak_z or new_peak_count:
+                        peak_items  = tripwire.state.get_window_items(ev.subreddit, e)
+                        rec["peak"] = _enrich_items(peak_items)
 
             # ── release: finalise and write ONE rich record to JSONL ───────────
             for ev in releases:

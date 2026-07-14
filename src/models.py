@@ -18,6 +18,11 @@ class Comment:
     item_type:   str = ""
     item_id:     int = 0
     created_at:  int = 0
+    # Bluesky-specific enrichment — always empty for HN comments
+    platform_uri:     str       = ""
+    root_uri:         str       = ""
+    hashtags:         List[str] = field(default_factory=list)
+    matched_keywords: List[str] = field(default_factory=list)
 
 
 @dataclass
