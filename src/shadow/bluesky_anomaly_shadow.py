@@ -140,6 +140,33 @@ def _enrich_items(items: List[Dict]) -> Dict:
     }
 
 
+def _is_concentration_burst(opening: Dict, items: List[Dict]) -> tuple[bool, list]:
+    """Return (True, reasons) when BOTH a single author AND a single domain
+    dominate the sampled window — strong signal for a scheduled feed bot."""
+    total = len(items)
+    if not total:
+        return False, []
+    author_hit = bool(opening["authors"] and opening["authors"][0][1] / total > 0.4)
+    domain_hit = bool(opening["domains"] and opening["domains"][0][1] / total > 0.6)
+    if author_hit and domain_hit:
+        return True, [
+            f"author:{opening['authors'][0][0]}",
+            f"domain:{opening['domains'][0][0]}",
+        ]
+    return False, []
+
+
+def _find_recurring(channel: str, event_start: int, anomaly_log: List, skip_id: str) -> str | None:
+    """Return the event_id of a prior same-channel event that started within
+    ±45 min of the same UTC time-of-day, or None if none found."""
+    tod = event_start % 86400
+    for prior in reversed(anomaly_log):
+        if prior.get("channel") == channel and prior.get("event_id") != skip_id:
+            if abs(prior["event_start"] % 86400 - tod) <= 2700:
+                return prior["event_id"]
+    return None
+
+
 # ---------------------------------------------------------------------------
 # GCS upload
 # ---------------------------------------------------------------------------
@@ -176,9 +203,10 @@ def _fire_ticks(
     active_events:    Dict,       # keyed by channel; accumulates state across start→release
     anomaly_log:      List,
     anomaly_events_path: Path,
-    eval_count:       list,       # [int] — mutable counter
-    base_count:       list,
-    anomaly_count:    list,
+    eval_count:          list,    # [int] — mutable counter
+    base_count:          list,
+    threshold_count:     list,    # [int] — all start events (every threshold crossing)
+    feed_suspect_count:  list,    # [int] — confirmed feed bursts (both windows)
 ) -> None:
     while True:
         e, b = ticks["eval"], ticks["base"]
@@ -200,7 +228,8 @@ def _fire_ticks(
             for ev in gated_starts:
                 opening      = _enrich_items(ev.items or [])
                 sample_texts = [p["text"][:150] for p in opening["posts"][:3]]
-                active_events[ev.subreddit] = {
+                is_conc, conc_reasons = _is_concentration_burst(opening, ev.items or [])
+                rec = {
                     "event_id":     f"bluesky-{ev.subreddit}-{ev.event_start}",
                     "source":       "bluesky",
                     "channel":      ev.subreddit,
@@ -216,12 +245,17 @@ def _fire_ticks(
                     "opening":      opening,
                     "sample_texts": sample_texts,
                 }
+                if is_conc:
+                    rec["opening_concentration_suspect"] = True
+                    rec["concentration_reasons"]         = conc_reasons
+                active_events[ev.subreddit] = rec
                 fires_by_channel[ev.subreddit] += 1
                 if ev.z_score > max_z_by_channel.get(ev.subreddit, float("-inf")):
                     max_z_by_channel[ev.subreddit] = ev.z_score
-                anomaly_count[0] += 1
+                threshold_count[0] += 1
+                label = "CONCENTRATION SUSPECT" if is_conc else "SURGE START"
                 print(
-                    f"[anomaly] SURGE START  {ev.subreddit}  z={ev.z_score}  "
+                    f"[anomaly] {label}  {ev.subreddit}  z={ev.z_score}  "
                     f"count={ev.count}  mean={ev.mean}",
                     flush=True,
                 )
@@ -243,6 +277,9 @@ def _fire_ticks(
                     if new_peak_z or new_peak_count:
                         peak_items  = tripwire.state.get_window_items(ev.subreddit, e)
                         rec["peak"] = _enrich_items(peak_items)
+                        peak_conc, _ = _is_concentration_burst(rec["peak"], peak_items)
+                        if peak_conc:
+                            rec["peak_concentration_suspect"] = True
 
             # ── release: finalise and write ONE rich record to JSONL ───────────
             for ev in releases:
@@ -269,6 +306,18 @@ def _fire_ticks(
                     rec["peak_z"] = ev.z_score
                 if ev.count > rec["peak_count"]:
                     rec["peak_count"] = ev.count
+
+                # Confirm feed burst: both opening AND peak windows concentrated.
+                if rec.get("opening_concentration_suspect") and rec.get("peak_concentration_suspect"):
+                    rec["feed_burst_suspect"] = True
+                    feed_suspect_count[0] += 1
+
+                # Recurrence: same channel, same UTC hour in prior completed events.
+                prior_id = _find_recurring(ev.subreddit, rec["event_start"], anomaly_log, rec["event_id"])
+                if prior_id:
+                    rec["recurring_prior"] = prior_id
+                    if rec.get("feed_burst_suspect"):
+                        rec["recurring_feed_suspect"] = True
 
                 duration_s = e - rec["event_start"]
                 entry = {
@@ -316,10 +365,11 @@ def _write_summary(
     active_events:    Dict,
     tripwire,
     state,
-    eval_count:       list,
-    base_count:       list,
-    anomaly_count:    list,
-    anomaly_log:      List,
+    eval_count:         list,
+    base_count:         list,
+    threshold_count:    list,
+    feed_suspect_count: list,
+    anomaly_log:        List,
 ) -> None:
     now = int(time.time())
     last_eval = tripwire.channel_stats()
@@ -360,7 +410,9 @@ def _write_summary(
         "uptime_s":             int(time.monotonic() - start_mono),
         "eval_ticks_fired":     eval_count[0],
         "baseline_ticks_fired": base_count[0],
-        "anomalies_fired":      anomaly_count[0],
+        "threshold_crossings":  threshold_count[0],
+        "feed_burst_suspects":  feed_suspect_count[0],
+        "reportable_anomalies": threshold_count[0] - feed_suspect_count[0],
         "kept_by_channel":      dict(kept_by_channel),
         "channel_stats":        channel_summary,
         "active_surges":        active_snapshot,
@@ -418,9 +470,10 @@ def main() -> None:
     max_z_by_channel: Dict[str, float]  = {}
     active_events:    Dict[str, dict]   = {}   # currently-elevated channels
     anomaly_log:      List              = []   # completed event records (for summary)
-    eval_count    = [0]
-    base_count    = [0]
-    anomaly_count = [0]
+    eval_count         = [0]
+    base_count         = [0]
+    threshold_count    = [0]
+    feed_suspect_count = [0]
     ticks: Dict   = {"eval": None, "base": None}
     last_summary = time.monotonic()
     last_upload  = time.monotonic()
@@ -447,7 +500,7 @@ def main() -> None:
             now, tripwire, gate, ticks,
             kept_by_channel, fires_by_channel, max_z_by_channel,
             active_events, anomaly_log, anomaly_events_path,
-            eval_count, base_count, anomaly_count,
+            eval_count, base_count, threshold_count, feed_suspect_count,
         )
 
         mono = time.monotonic()
@@ -457,7 +510,7 @@ def main() -> None:
                 _SUMMARY_PATH, wall_start, start_mono,
                 kept_by_channel, fires_by_channel, max_z_by_channel,
                 active_events, tripwire, state,
-                eval_count, base_count, anomaly_count, anomaly_log,
+                eval_count, base_count, threshold_count, feed_suspect_count, anomaly_log,
             )
             last_summary = mono
 
