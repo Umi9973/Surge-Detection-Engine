@@ -140,19 +140,46 @@ def _enrich_items(items: List[Dict]) -> Dict:
     }
 
 
-def _is_concentration_burst(opening: Dict, items: List[Dict]) -> tuple[bool, list]:
-    """Return (True, reasons) when BOTH a single author AND a single domain
-    dominate the sampled window — strong signal for a scheduled feed bot."""
+_KNOWN_FEED_DOMAINS: dict[str, set] = {
+    "science_space": {"arxiv.org", "biorxiv.org", "medrxiv.org"},
+}
+
+
+def _is_concentration_burst(channel: str, opening: Dict, items: List[Dict]) -> tuple[bool, list]:
+    """Return (True, reasons) if either feed-domain rule OR single-source rule fires.
+
+    Rule 1 — known feed domain (channel-scoped):
+        top domain is a known paper-feed domain AND covers ≥60% of window AND total ≥ 100.
+
+    Rule 2 — single-source aggregator:
+        top author covers >40% of window AND top domain covers >35% AND total ≥ 50.
+    """
     total = len(items)
     if not total:
         return False, []
-    author_hit = bool(opening["authors"] and opening["authors"][0][1] / total > 0.4)
-    domain_hit = bool(opening["domains"] and opening["domains"][0][1] / total > 0.6)
-    if author_hit and domain_hit:
-        return True, [
-            f"author:{opening['authors'][0][0]}",
-            f"domain:{opening['domains'][0][0]}",
-        ]
+
+    top_domain       = opening["domains"][0][0] if opening["domains"] else ""
+    top_domain_count = opening["domains"][0][1] if opening["domains"] else 0
+    top_author       = opening["authors"][0][0] if opening["authors"] else ""
+    top_author_count = opening["authors"][0][1] if opening["authors"] else 0
+
+    # Rule 1: known feed-domain burst
+    feed_domains = _KNOWN_FEED_DOMAINS.get(channel, set())
+    if (
+        total >= 100
+        and top_domain in feed_domains
+        and top_domain_count / total >= 0.60
+    ):
+        return True, [f"known_feed_domain:{top_domain}"]
+
+    # Rule 2: single-source aggregator
+    if (
+        total >= 50
+        and top_author_count / total > 0.40
+        and top_domain_count / total > 0.35
+    ):
+        return True, [f"author_domain_concentration:{top_author}:{top_domain}"]
+
     return False, []
 
 
@@ -228,7 +255,7 @@ def _fire_ticks(
             for ev in gated_starts:
                 opening      = _enrich_items(ev.items or [])
                 sample_texts = [p["text"][:150] for p in opening["posts"][:3]]
-                is_conc, conc_reasons = _is_concentration_burst(opening, ev.items or [])
+                is_conc, conc_reasons = _is_concentration_burst(ev.subreddit, opening, ev.items or [])
                 rec = {
                     "event_id":     f"bluesky-{ev.subreddit}-{ev.event_start}",
                     "source":       "bluesky",
@@ -277,7 +304,7 @@ def _fire_ticks(
                     if new_peak_z or new_peak_count:
                         peak_items  = tripwire.state.get_window_items(ev.subreddit, e)
                         rec["peak"] = _enrich_items(peak_items)
-                        peak_conc, _ = _is_concentration_burst(rec["peak"], peak_items)
+                        peak_conc, _ = _is_concentration_burst(ev.subreddit, rec["peak"], peak_items)
                         if peak_conc:
                             rec["peak_concentration_suspect"] = True
 
