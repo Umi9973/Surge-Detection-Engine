@@ -317,6 +317,30 @@ _MIN_SCORE: Dict[str, float] = {
     "social_platforms": 2.0,
 }
 
+# Context gate: channels whose scores are built entirely from weak keywords
+# have their score discounted to 0.25× unless a strong co-signal is present.
+# Prevents "exploit" (gaming) → cybersecurity, "health" (personal) → health_medicine, etc.
+_CONTEXT_GATE: Dict[str, Dict[str, frozenset]] = {
+    "cybersecurity": {
+        "weak":   frozenset({"exploit", "security", "hack", "attack", "threat", "breach"}),
+        "strong": frozenset({"cve", "zero-day", "ransomware", "malware", "phishing",
+                             "vulnerability", "nsa", "cisa", "fbi", "apt", "backdoor",
+                             "spyware", "trojan", "rootkit", "keylogger", "botnet"}),
+    },
+    "science_space": {
+        "weak":   frozenset({"science", "research", "study", "discovery", "space"}),
+        "strong": frozenset({"nasa", "spacex", "arxiv", "esa", "telescope", "galaxy",
+                             "black hole", "biorxiv", "medrxiv", "jwst", "asteroid",
+                             "neutron", "quasar", "exoplanet", "hubble", "rocket"}),
+    },
+    "health_medicine": {
+        "weak":   frozenset({"health", "medicine", "medical", "doctor", "hospital"}),
+        "strong": frozenset({"fda", "cdc", "who", "nih", "vaccine", "clinical",
+                             "pandemic", "outbreak", "treatment", "diagnosis",
+                             "pathogen", "trial", "pharmaceutical", "mortality"}),
+    },
+}
+
 # Keywords where left-boundary match only so inflected forms match:
 # hack → hacked/hacking, breach → breached, exploit → exploiting, etc.
 _PREFIX_ROOTS: frozenset = frozenset({"hack", "breach", "exploit", "leak", "protest", "artfight", "strike", "union"})
@@ -513,6 +537,17 @@ class BlueskyTopicRouter:
                 "body_score": 0.0, "embed_score": 0.0,
                 **_empty_audit,
             }
+
+        # Context gate: discount channels where all matched keywords are weak-signal
+        # and no strong co-signal appears anywhere in the post text.
+        text_combined = (body + " " + embed_text).lower()
+        for ch, gate in _CONTEXT_GATE.items():
+            if ch not in channel_scores:
+                continue
+            matched_kws = {kw.lower() for kw in channel_keywords.get(ch, [])}
+            if matched_kws and matched_kws.issubset(gate["weak"]):
+                if not any(s in text_combined for s in gate["strong"]):
+                    channel_scores[ch] *= 0.25
 
         # Apply per-channel minimum score floors before winner selection.
         failed_min_score = [

@@ -77,7 +77,7 @@ class RedisStateManager(StateManager):
 
     def ingest(self, comment: Comment) -> None:
         key    = f"window:{comment.subreddit}"
-        member = f"{uuid4().hex}:{json.dumps({'t': comment.body[:120], 'sid': comment.story_id, 'st': comment.story_title, 'd': comment.domain, 'it': comment.item_type, 'iid': comment.item_id, 'ca': comment.created_at, 'uri': comment.platform_uri, 'ruri': comment.root_uri, 'a': comment.author, 'h': comment.hashtags, 'kw': comment.matched_keywords})}"
+        member = f"{uuid4().hex}:{json.dumps({'t': comment.body[:120], 'sid': comment.story_id, 'st': comment.story_title, 'd': comment.domain, 'it': comment.item_type, 'iid': comment.item_id, 'ca': comment.created_at, 'uri': comment.platform_uri, 'ruri': comment.root_uri, 'a': comment.author, 'h': comment.hashtags, 'kw': comment.matched_keywords, 'rs': comment.route_score, 'rr': comment.route_runner, 'rm': comment.route_margin, 'rb': comment.route_boost})}"
         self.r.zadd(key, {member: comment.timestamp})
 
     # --- Window ---
@@ -115,6 +115,10 @@ class RedisStateManager(StateManager):
                     "author":           d.get("a",    ""),
                     "hashtags":         d.get("h",    []),
                     "matched_keywords": d.get("kw",   []),
+                    "route_score":      d.get("rs",   0.0),
+                    "route_runner":     d.get("rr",   ""),
+                    "route_margin":     d.get("rm",   0.0),
+                    "route_boost":      d.get("rb",   ""),
                 })
             except Exception:
                 # Old entry or parse error — degrade gracefully
@@ -131,6 +135,10 @@ class RedisStateManager(StateManager):
                     "author":           "",
                     "hashtags":         [],
                     "matched_keywords": [],
+                    "route_score":      0.0,
+                    "route_runner":     "",
+                    "route_margin":     0.0,
+                    "route_boost":      "",
                 })
         return items
 

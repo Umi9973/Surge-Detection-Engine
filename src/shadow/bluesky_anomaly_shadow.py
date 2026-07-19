@@ -108,6 +108,10 @@ def _to_comment(raw: Dict) -> Comment:
         root_uri         = raw.get("root_uri", ""),
         hashtags         = raw.get("hashtags", []),
         matched_keywords = raw.get("routing", {}).get("matched_keywords", []),
+        route_score      = float(raw.get("routing", {}).get("top_score",      0.0)),
+        route_runner     = raw.get("routing", {}).get("second_channel", ""),
+        route_margin     = float(raw.get("routing", {}).get("score_margin",   0.0)),
+        route_boost      = raw.get("routing", {}).get("domain_boost_used", ""),
     )
 
 # ---------------------------------------------------------------------------
@@ -128,6 +132,10 @@ def _enrich_items(items: List[Dict]) -> Dict:
             "hashtags":     it.get("hashtags", []),
             "keywords":     it.get("matched_keywords", []),
             "domain":       it.get("domain", ""),
+            "route_score":  it.get("route_score",  0.0),
+            "route_runner": it.get("route_runner", ""),
+            "route_margin": it.get("route_margin", 0.0),
+            "route_boost":  it.get("route_boost",  ""),
         }
         for it in items[:5]
     ]

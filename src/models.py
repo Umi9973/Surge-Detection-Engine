@@ -23,6 +23,11 @@ class Comment:
     root_uri:         str       = ""
     hashtags:         List[str] = field(default_factory=list)
     matched_keywords: List[str] = field(default_factory=list)
+    # Routing audit — always empty for HN comments
+    route_score:  float = 0.0
+    route_runner: str   = ""
+    route_margin: float = 0.0
+    route_boost:  str   = ""
 
 
 @dataclass
