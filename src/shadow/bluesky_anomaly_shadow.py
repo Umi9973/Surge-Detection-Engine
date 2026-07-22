@@ -123,6 +123,11 @@ def _enrich_items(items: List[Dict]) -> Dict:
     ht_counts   = Counter(ht for it in items for ht in it.get("hashtags", []))
     dom_counts  = Counter(it.get("domain", "") for it in items if it.get("domain"))
     auth_counts = Counter(it.get("author", "") for it in items if it.get("author"))
+    total = len(items)
+    text_counts       = Counter(it.get("text", "")[:80] for it in items if it.get("text"))
+    top_text_count    = text_counts.most_common(1)[0][1] if text_counts else 0
+    top_text_pct      = round(top_text_count / total, 3) if total else 0.0
+    text_unique_ratio = round(len(text_counts) / total, 3) if total else 0.0
     posts = [
         {
             "text":         it.get("text", "")[:200],
@@ -140,11 +145,13 @@ def _enrich_items(items: List[Dict]) -> Dict:
         for it in items[:5]
     ]
     return {
-        "posts":    posts,
-        "keywords": kw_counts.most_common(10),
-        "hashtags": ht_counts.most_common(10),
-        "domains":  dom_counts.most_common(5),
-        "authors":  auth_counts.most_common(5),
+        "posts":            posts,
+        "keywords":         kw_counts.most_common(10),
+        "hashtags":         ht_counts.most_common(10),
+        "domains":          dom_counts.most_common(5),
+        "authors":          auth_counts.most_common(5),
+        "top_text_pct":     top_text_pct,
+        "text_unique_ratio": text_unique_ratio,
     }
 
 
@@ -346,6 +353,12 @@ def _fire_ticks(
                 if rec.get("opening_concentration_suspect") and rec.get("peak_concentration_suspect"):
                     rec["feed_burst_suspect"] = True
                     feed_suspect_count[0] += 1
+
+                # Coordinated posting: same 80-char prefix appears in >25% of posts.
+                opening_top = rec.get("opening", {}).get("top_text_pct", 0.0)
+                peak_top    = rec.get("peak",    {}).get("top_text_pct", 0.0)
+                if max(opening_top, peak_top) > 0.25 and not rec.get("feed_burst_suspect"):
+                    rec["coordinated_suspect"] = True
 
                 # Recurrence: same channel, same UTC hour in prior completed events.
                 prior_id = _find_recurring(ev.subreddit, rec["event_start"], anomaly_log, rec["event_id"])
