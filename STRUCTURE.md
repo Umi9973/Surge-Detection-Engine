@@ -2,7 +2,7 @@
 
 Real-time event detection across social discussion platforms. The pipeline spots when the internet starts talking about something before it becomes mainstream news, by monitoring topic channels, detecting statistical surges, and consolidating repeated signals into typed TrackedEvents.
 
-**Current platform:** Hacker News. Bluesky (and Reddit) are the next planned sources. The architecture is deliberately split so all platform-specific code lives in one place — everything downstream is platform-neutral.
+**Current platforms:** Hacker News (live, production) and Bluesky (live, shadow-mode — ingesting and detecting in parallel, not yet wired into production alerting). Reddit ingestion is pending API approval. The architecture is deliberately split so all platform-specific code lives in one place — everything downstream is platform-neutral.
 
 ---
 
@@ -32,6 +32,8 @@ src/
     base.py
     hacker_news.py
     reddit.py
+    bluesky.py                 Jetstream WebSocket adapter + 12-channel topic router
+    bluesky_hashtag_stats.py    Passive hashtag-discovery stats collector
 
   pipeline/           ← anomaly detection + NLP enrichment
     sliding_tripwire.py
@@ -60,12 +62,34 @@ src/
   monitoring/
     health.py
 
+  shadow/             ← standalone Bluesky shadow runners (not wired into main.py)
+    bluesky_shadow.py           Stats-only ingestion audit
+    bluesky_anomaly_shadow.py   Full anomaly-detection shadow (Redis DB 1, isolated)
+
   reporting/          ← offline tools and BI export
     batch_enricher.py
     dashboard_generator.py
     export_powerbi.py
     inspect_candidates.py
     inspect_events.py
+
+tests/                ← regression suite (mostly standalone scripts, one true pytest file)
+  test_router.py
+  test_recurring_thread.py
+  test_sliding_tripwire.py
+  test_jetstream.py
+  regression_merge_baseline.py
+
+scripts/              ← operational/diagnostic tools run against live or GCS-backed data
+  hashtag_report.py
+  test_anomaly_replay.py
+  test_event_lifecycle.py
+  test_jetstream.py            ← different file from tests/test_jetstream.py, see below
+
+deploy/               ← systemd unit templates for the three production processes
+  hn-ingestor.service
+  bluesky-shadow.service
+  bluesky-anomaly-shadow.service
 ```
 
 ---
@@ -135,6 +159,20 @@ Three classes for HN ingestion:
 
 ### `reddit.py`
 **`ZstFileIngestor`** — reads a `.zst`-compressed Reddit comment dump and yields normalized dicts. Backtest-only (Reddit live API is pending). Demonstrates the minimal ingestor pattern: implement `stream()`, normalize each row to the shared schema, yield.
+
+### `bluesky.py`
+Live Bluesky ingestion, the first non-HN platform actually wired in. Two classes plus normalization helpers:
+
+- **`BlueskyTopicRouter`** — classifies a post into one of **12** topic channels (`cybersecurity`, `ai_tech`, `war_diplomacy`, `us_politics`, `activism_rights`, `climate_weather`, `health_medicine`, `science_space`, `money_markets`, `social_platforms`, `sports`, `entertainment_fandom`) or `"general"`. Scoring is a 4-layer pipeline: body text scan → embed (link-preview) text scan → hashtag scan (aliased/CamelCase-split, weight × `_HASHTAG_WEIGHT_MULT` = 1.5) → domain boost via `_DOMAIN_BOOSTS` (~40 known domains). After combining scores, a **context gate** (`_CONTEXT_GATE`) discounts `cybersecurity`/`science_space`/`health_medicine` by ×0.25 when the only matched keywords are "weak" (ambiguous) and no "strong" co-signal term appears anywhere in the text — this is what stops a gaming post mentioning "exploit" from routing to `cybersecurity`. A per-channel score floor (`_MIN_SCORE`, currently only `social_platforms` ≥ 2.0) excludes bare platform-name mentions. `classify_with_audit()` returns the full scoring trail (winner, runner-up, margin, matched keywords, domain boost used); `classify()` is a thin wrapper returning just the channel string.
+
+- **`BlueskyIngestor(DataIngestor)`** — connects to the Jetstream WebSocket firehose using the same sync/async bridge pattern as `HackerNewsIngestor` (`stream()` spawns a background thread running an asyncio event loop, yields items off a bounded queue). Each incoming post passes through a 9-stage filter (non-commit event, empty text, non-English, language-tag mismatch, adult-hashtag spam via `_ADULT_HASHTAGS`, recurring game-share templates, unmatched topic) before being routed and queued; every dropped post is logged with its reason to `data/debug/bluesky/dropped/*.jsonl` for auditing. Reconnects with exponential backoff (5s → 60s cap) on any WebSocket error.
+
+**Connection:** imports only `.base` (`DataIngestor`) and sibling module `.bluesky_hashtag_stats` (`HashtagStatsCollector`) — no `src/models.py`, `src/pipeline/`, or `src/storage/` — preserving the "ingestion is the only platform-aware package" rule stated above. Imported by `src/shadow/bluesky_shadow.py`, `src/shadow/bluesky_anomaly_shadow.py`, and `tests/test_jetstream.py`.
+
+### `bluesky_hashtag_stats.py`
+**`HashtagStatsCollector`** — bounded, tiered hashtag-discovery collector run alongside `BlueskyIngestor`. Every hashtag gets a cheap total/matched/unmatched count (capped at 50,000 unique hashtags); once a hashtag crosses 5 occurrences it's "promoted" to rich tracking (co-occurring channels, co-hashtags, external domains, a few body-text samples, capped author count), capped at 500 simultaneously-promoted hashtags. `write_snapshot()` atomically writes the current state to JSON, feeding `scripts/hashtag_report.py`'s keyword-discovery reports — used to decide what to add to `BlueskyTopicRouter`'s keyword lists.
+
+**Connection:** fully self-contained (stdlib only) — imports nothing from the rest of `src/`. Imported only by `bluesky.py` (`from .bluesky_hashtag_stats import HashtagStatsCollector`); `scripts/hashtag_report.py` consumes its JSON output file directly rather than importing the class, keeping the report generator decoupled from the collector's implementation.
 
 ---
 
@@ -229,6 +267,38 @@ class MatchingPolicy(ABC):
 
 ---
 
+## `src/shadow/` — standalone Bluesky shadow runners
+
+Both files here are **standalone scripts**, never imported by any other Python module (only invoked via the `deploy/bluesky-*.service` systemd units). They deliberately do not touch `main.py` — Bluesky was integrated as a parallel, isolated shadow pipeline rather than by extending the production HN entry point, so it could be observed and tuned without any risk to live HN alerting.
+
+### `bluesky_shadow.py`
+Stats-only ingestion audit runner — no detection logic at all. Streams `BlueskyIngestor`, keeps a per-channel `Counter` and a rolling 100-post sample (`deque`), rewrites `data/debug/bluesky/health.json` and `routed_samples/latest_routed_pretty.json` every 30s, and uploads the whole debug tree to GCS every 300s. Answers exactly one question: "is ingestion healthy and what is it routing right now?"
+
+**Connection:** imports `BlueskyIngestor` from `src/ingestion/bluesky.py` (lazily, inside `main()`, so import errors surface immediately at startup) and `google.cloud.storage` (lazily, only when an upload is attempted). Not imported by anything else; run only via `deploy/bluesky-shadow.service`.
+
+### `bluesky_anomaly_shadow.py`
+The full anomaly-detection shadow — wires the real Bluesky stream into the same `SlidingWindowTripwire` + `AlertGate` used by the HN pipeline, but pointed at an isolated **Redis DB 1** (production HN uses DB 0) with no webhook dispatch, so operators can validate Bluesky detection quality before it's ever wired into live alerting. Key pieces:
+
+- **Event lifecycle** — same start/update/release Schmitt-trigger hysteresis as HN (enter ELEVATED at Z ≥ 3.0, release at Z ≤ 2.0), but every threshold is env-overridable (`BSKY_Z_THRESHOLD`, `BSKY_WINDOW_TTL`=3600s i.e. a 1-hour window vs. HN's 2-hour, `BSKY_MIN_HISTORY`=6h, `BSKY_EVAL_INTERVAL`, `BSKY_BASELINE_INTERVAL`).
+- **`_enrich_items()`** — builds `opening`/`peak` window snapshots per event: keyword/hashtag/domain/author frequency counts, the first 5 posts (with full routing-audit fields), and two dedup/coordination signals — `top_text_pct` (share of items with the same 80-char text prefix) and `text_unique_ratio` (distinct prefixes / total items).
+- **`_is_concentration_burst()`** — two independent feed-detection rules: (1) known-feed-domain — `_KNOWN_FEED_DOMAINS = {"science_space": {"arxiv.org", "biorxiv.org", "medrxiv.org"}}`, fires when that domain is ≥60% of a ≥100-item window; (2) single-source aggregator — fires when one author covers >40% AND one domain covers >35% of a ≥50-item window, for any channel. `feed_burst_suspect` is only confirmed if **both** the opening and peak windows are concentrated.
+- **`_find_recurring()`** — flags likely scheduled/bot bursts by checking if any of the last 50 completed events in the same channel started within ±45 minutes of the same UTC time-of-day (`recurring_prior` / `recurring_feed_suspect`).
+- **`coordinated_suspect`** — separately flagged (independent of feed-burst) when `top_text_pct` exceeds 0.25 at either window and the event isn't already a feed burst — catches copy-paste template spam (e.g. activism hashtag chains) that a single bot-domain rule wouldn't.
+- No context-gate logic lives here — the only gate is `AlertGate`, and it's instantiated in-memory only (no Redis backend), so its cooldown state resets on every restart.
+- **Output** — `anomaly_summary_latest.json` (rewritten every 300s: channel stats, active surges, last 50 completed events) and `anomaly_events_{run_ts}.jsonl` (one appended line per released event, containing the full opening/peak enrichment and all forensic flags above), both mirrored to GCS every 300s.
+
+**Connection:** imports `BlueskyIngestor` (`src/ingestion/bluesky.py`), `Comment` (`src/models.py`), `SlidingWindowTripwire` and `AlertGate` (`src/pipeline/`), and `RedisStateManager` (`src/storage/state_manager.py`) — all lazily, inside `main()`. Deliberately duplicates `main.py`'s comment-conversion logic locally (`_to_comment()`) rather than importing the script module. Not imported by anything else; run only via `deploy/bluesky-anomaly-shadow.service`.
+
+| | `bluesky_shadow.py` | `bluesky_anomaly_shadow.py` |
+|---|---|---|
+| Detection engine | None | `SlidingWindowTripwire` |
+| Redis | None | DB 1 (isolated) |
+| Event concept | Rolling counts only | Full start/update/release lifecycle |
+| Output cadence | 30s (health) / 300s (GCS) | 300s (summary + GCS) |
+| Env-configurable | No | Yes (5 `BSKY_*` vars) |
+
+---
+
 ## `src/reporting/` — offline tools and BI export
 
 ### `batch_enricher.py`
@@ -248,7 +318,82 @@ CLI viewer for `TrackedEvent` JSONL files. Three modes: individual event blocks 
 
 ---
 
-## Adding Bluesky — summary checklist
+## `tests/` — regression suite
+
+Only one file here is a true pytest suite; the rest are standalone scripts (runnable directly, some also pytest-discoverable) kept in `tests/` because they check correctness rather than run against live/production-shaped data.
+
+### `test_router.py`
+The only true pytest suite in the repo (`@pytest.fixture` + `@pytest.mark.parametrize`). Regression-pins `HNTopicRouter`'s keyword scoring, tier-3 brand names, domain boosts, and tie-break margin logic so keyword-list edits can be checked without running the live pipeline.
+
+**Connection:** imports only `src.ingestion.hacker_news.HNTopicRouter`.
+
+### `test_recurring_thread.py`
+Verifies HN megathread detection (e.g. "Who is hiring?") is classified `kind == "recurring_thread"` and that superficially similar titles are not misclassified. Written as plain `test_*` functions, runnable both via pytest and directly.
+
+**Connection:** imports `src.events.candidate_builder.CandidateBuilder`.
+
+### `test_sliding_tripwire.py`
+Standalone load-test (not pytest-discoverable despite the filename) using `fakeredis`: simulates 4 hours of synthetic traffic across 13 channels, injects an 800-comment spike, and asserts the anomaly fires, `AlertGate`'s cooldown suppresses duplicates, sampled texts are capped at 500, and old window data is pruned after TTL.
+
+**Connection:** imports `src.models.{AnomalyEvent,Comment}`, `src.storage.state_manager.RedisStateManager`, `src.pipeline.sliding_tripwire.SlidingWindowTripwire`, `src.pipeline.alert_gate.AlertGate`.
+
+### `test_jetstream.py`
+Live connectivity/diagnostic tool for the Bluesky Jetstream firehose — modes: default (print N posts), `--volume` (throughput), `--channel-stats` (routes live posts through the real router and reports per-channel rates), `--raw`. Requires live internet access; not CI-suitable. **Different file from `scripts/test_jetstream.py`** — this one imports and exercises the router, the `scripts/` version is a bare connectivity check with no `src/` dependency at all.
+
+**Connection:** imports `src.ingestion.bluesky.{BlueskyTopicRouter,_normalize_post}` (only in `--channel-stats` mode).
+
+### `regression_merge_baseline.py`
+The most important regression gate in the repo. Replays a hand-curated golden dataset (`data/audit/golden_merge_cases.json`) through `SameChannelPolicy.score()` and a full `EventConsolidator` pass, hard-failing (exit 1) on any `must_merge`/`must_not_merge` violation; `scenario_e2e` (full grouping scenarios) failures are reported as warnings only, not hard failures.
+
+**Connection:** imports `src.events.consolidator.{EventConsolidator,_row_to_candidate}`, `src.events.evidence.EventEvidence`, `src.events.matching_policy.SameChannelPolicy`, `src.events.models.{EventCandidate,TrackedEvent}`; reads `data/audit/golden_merge_cases.json` and `data/event_candidates/**/*.parquet` directly.
+
+---
+
+## `scripts/` — operational and diagnostic tools
+
+Distinct from `tests/`: these run against live or GCS-backed production-shaped data rather than isolated fixtures.
+
+### `hashtag_report.py`
+Reads the latest `HashtagStatsCollector` snapshot and writes three discovery reports (`top_unmatched_hashtags.csv`, `top_routed_hashtags.csv`, `hashtag_suggestions.json`) suggesting router keyword additions. Run periodically while a Bluesky shadow service is live.
+
+**Connection:** no `src/` import — reads the JSON file `src/ingestion/bluesky_hashtag_stats.py`'s `HashtagStatsCollector.write_snapshot()` produces, keeping the report generator decoupled from the collector's implementation.
+
+### `test_anomaly_replay.py`
+Offline replay of the Bluesky anomaly path using `fakeredis`: downloads real routed sample post bodies from GCS (falls back to synthetic text), builds 8 hours of synthetic per-channel baseline, injects a configurable surge multiplier into one channel, and prints the resulting per-channel z-scores and any fired anomalies. Used to sanity-check tripwire/gate changes without a live Jetstream connection.
+
+**Connection:** imports `src.models.Comment`, `src.pipeline.alert_gate.AlertGate`, `src.pipeline.sliding_tripwire.SlidingWindowTripwire`, `src.storage.state_manager.RedisStateManager`.
+
+### `test_event_lifecycle.py`
+Deterministic (`random.seed(0)`), fully synthetic smoke test of the start/update/release event-lifecycle state machine: injects a 5x surge, verifies exactly one `start`, subsequent `update`s (not repeated starts), and exactly one `release` on drain. CI-friendly exit codes (~15 internal assertions).
+
+**Connection:** imports `src.models.{Comment,AnomalyEvent}`, `src.pipeline.sliding_tripwire.SlidingWindowTripwire`, `src.storage.state_manager.RedisStateManager`.
+
+### `test_jetstream.py`
+Bare-bones Jetstream connectivity check — connects, prints the first N posts, exits. No router, no channel stats, no `src/` dependency at all. **Different file from `tests/test_jetstream.py`** (the fuller diagnostic tool with router integration) — same filename, two genuinely different scripts; do not confuse them.
+
+**Connection:** none — fully self-contained aside from the `websockets` library.
+
+---
+
+## `deploy/` — systemd unit templates
+
+Three production processes, all sharing the same shape (`Type=simple`, `Restart=on-failure`, journal logging).
+
+| Unit | Runs | Notes |
+|------|------|-------|
+| `hn-ingestor.service` | `src/main.py` (`live_hn()`) | The production HN pipeline. No tunable env vars — thresholds are hardcoded in `sliding_tripwire.py`. |
+| `bluesky-shadow.service` | `src/shadow/bluesky_shadow.py` | Stats-only audit. No tunable env vars. |
+| `bluesky-anomaly-shadow.service` | `src/shadow/bluesky_anomaly_shadow.py` | Full anomaly shadow. **Only unit with tunable `Environment=` vars** (`BSKY_MIN_HISTORY`, `BSKY_Z_THRESHOLD`, `BSKY_WINDOW_TTL`, `BSKY_EVAL_INTERVAL`, `BSKY_BASELINE_INTERVAL`) and the only one declaring `After=redis.service` (it's the only shadow process that touches Redis). |
+
+**Connection:** each unit's `ExecStart` maps 1:1 to the entry-point files documented above (`src/main.py`, `src/shadow/bluesky_shadow.py`, `src/shadow/bluesky_anomaly_shadow.py`) — see those sections for what each process imports.
+
+---
+
+## How Bluesky actually integrated
+
+The original plan (below, kept for history) was to extend `main.py` with a `live_bluesky()` entry point sharing the HN pipeline's `ParquetArchiver`/`WebhookDispatcher`. That's not what happened. Instead, Bluesky was integrated as a **fully parallel, isolated shadow pipeline** (`src/shadow/`) — separate Redis DB, no webhook dispatch, own JSONL/GCS output — so ingestion quality and detection tuning could be validated live without any risk to production HN alerting. As of this writing Bluesky has not been wired into `main.py` or production alerting; see `src/shadow/` above for the actual current architecture.
+
+### Original plan (superseded)
 
 | Step | File | What to do |
 |------|------|-----------|
