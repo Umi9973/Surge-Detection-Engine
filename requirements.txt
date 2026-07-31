@@ -10,3 +10,4 @@ google-cloud-storage
 pandas
 aiohttp
 websockets
+confluent-kafka
